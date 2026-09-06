@@ -62,6 +62,17 @@ async def run_signaling_tests():
         await alice.send(json.dumps({"type": "call_ended", "call_id": call_id}))
         assert await receive_json(bob) == {"type": "call_ended", "call_id": call_id}
 
+        # Both users are immediately available for another call on the same sockets.
+        await alice.send(json.dumps({"type": "call_request", "to_user_id": bob_id}))
+        second_incoming = await receive_json(bob)
+        second_started = await receive_json(alice)
+        assert second_incoming["call_id"] == second_started["call_id"]
+        await bob.send(json.dumps({"type": "call_ended", "call_id": second_incoming["call_id"]}))
+        assert await receive_json(alice) == {
+            "type": "call_ended",
+            "call_id": second_incoming["call_id"],
+        }
+
     print("--- Reject and caller cancel ---")
     async with websockets.connect(f"{WS_URL}/ws/{alice_id}") as alice, \
                websockets.connect(f"{WS_URL}/ws/{bob_id}") as bob:

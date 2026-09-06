@@ -57,7 +57,25 @@ class ConnectionManager:
             return True
         except Exception as exc:
             logger.warning("[ConnectionManager] Failed to send to '%s': %s", user_id, exc)
+            call = self.get_user_call(user_id)
             self.disconnect(user_id, websocket)
+            if call is not None:
+                partner_id = self.get_call_partner(user_id)
+                self.end_call(call.call_id)
+                if partner_id:
+                    partner_socket = self.active_connections.get(partner_id)
+                    if partner_socket is not None:
+                        try:
+                            await partner_socket.send_text(
+                                json.dumps({"type": "call_ended", "call_id": call.call_id})
+                            )
+                        except Exception as partner_exc:
+                            logger.warning(
+                                "[ConnectionManager] Failed to notify '%s' after call delivery failure: %s",
+                                partner_id,
+                                partner_exc,
+                            )
+                            self.disconnect(partner_id, partner_socket)
             return False
 
     def is_online(self, user_id: str) -> bool:
@@ -71,13 +89,19 @@ class ConnectionManager:
 
     def get_user_call(self, user_id: str) -> Optional[Call]:
         call_id = self.user_call_ids.get(user_id)
-        return self.calls.get(call_id) if call_id else None
+        if not call_id:
+            return None
+        call = self.calls.get(call_id)
+        if call is None:
+            del self.user_call_ids[user_id]
+        return call
 
     def is_busy(self, user_id: str) -> bool:
-        return user_id in self.user_call_ids
+        return self.get_user_call(user_id) is not None
 
     def get_busy_call_id(self, user_id: str) -> Optional[str]:
-        return self.user_call_ids.get(user_id)
+        call = self.get_user_call(user_id)
+        return call.call_id if call is not None else None
 
     def get_call_partner(self, user_id: str) -> Optional[str]:
         call = self.get_user_call(user_id)
@@ -115,9 +139,15 @@ class ConnectionManager:
 
     def end_call(self, call_id: str) -> Optional[Call]:
         call = self.calls.pop(call_id, None)
-        if call is None:
-            return None
-        for user_id in (call.caller_id, call.receiver_id):
+        if call is not None:
+            participant_ids = (call.caller_id, call.receiver_id)
+        else:
+            participant_ids = tuple(
+                user_id
+                for user_id, mapped_call_id in self.user_call_ids.items()
+                if mapped_call_id == call_id
+            )
+        for user_id in participant_ids:
             if self.user_call_ids.get(user_id) == call_id:
                 del self.user_call_ids[user_id]
         return call

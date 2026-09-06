@@ -47,6 +47,38 @@ class TestConnectionManager(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.manager.is_busy("alice"))
         self.assertFalse(self.manager.is_busy("bob"))
 
+    async def test_stale_user_call_id_is_removed_and_not_busy(self):
+        self.manager.user_call_ids["alice"] = "missing-call"
+
+        self.assertFalse(self.manager.is_busy("alice"))
+        self.assertIsNone(self.manager.get_busy_call_id("alice"))
+        self.assertNotIn("alice", self.manager.user_call_ids)
+
+    async def test_end_call_is_idempotent_and_clears_orphaned_mappings(self):
+        self.manager.user_call_ids["alice"] = "orphaned-call"
+        self.manager.user_call_ids["bob"] = "orphaned-call"
+
+        self.assertIsNone(self.manager.end_call("orphaned-call"))
+        self.manager.end_call("orphaned-call")
+
+        self.assertFalse(self.manager.is_busy("alice"))
+        self.assertFalse(self.manager.is_busy("bob"))
+        self.assertNotIn("alice", self.manager.user_call_ids)
+        self.assertNotIn("bob", self.manager.user_call_ids)
+
+    async def test_delivery_failure_ends_call_and_notifies_partner(self):
+        call, _ = await self.manager.create_call("alice", "bob")
+        self.alice_socket.send_text.side_effect = RuntimeError("socket closed")
+
+        self.assertFalse(await self.manager.send_to("alice", {"type": "call_started"}))
+
+        self.assertIsNone(self.manager.get_call(call.call_id))
+        self.assertFalse(self.manager.is_busy("alice"))
+        self.assertFalse(self.manager.is_busy("bob"))
+        notification = self.bob_socket.send_text.call_args.args[0]
+        self.assertIn('"type": "call_ended"', notification)
+        self.assertIn(call.call_id, notification)
+
     async def test_old_socket_cannot_disconnect_new_socket(self):
         old_socket = self.alice_socket
         new_socket = AsyncMock()
