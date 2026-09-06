@@ -38,8 +38,10 @@ This guide walks you through deploying the Calling App Signaling Backend to [Ren
      ```
 4. Configure Environment Variables:
    - Click **Add Environment Variable**.
-   - Key: `DATABASE_URL`
-   - Value: Paste the **Internal Database URL** copied from Step 1.
+   - `DATABASE_URL`: Paste the **Internal Database URL** copied from Step 1.
+   - `TURN_HOST`: Domain or public IP of your Coturn server (e.g. `turn.yourdomain.com`).
+   - `TURN_STATIC_AUTH_SECRET`: Secret key matching `static-auth-secret` in your `turnserver.conf`.
+   - `TURN_TTL` *(optional)*: Credential validity duration in seconds (defaults to `3600`).
 5. Click **Create Web Service**.
 
 ---
@@ -48,5 +50,35 @@ This guide walks you through deploying the Calling App Signaling Backend to [Ren
 
 - **Dialect Auto-Fix**: Render provides database connection strings beginning with `postgres://`. The backend in `app/database.py` automatically normalizes this to `postgresql://` as required by SQLAlchemy 2.0.
 - **Table Creation**: On server startup, the application runs `Base.metadata.create_all(bind=engine)` to automatically create all required tables (`users` and `contacts`) without requiring manual migration runs.
-- **Health Check**: Render's health probe checks `GET /`, which returns `{"status": "ok"}` with HTTP 200.
+- **Health Check**: Render's health probe checks `GET /` and `GET /health`, which return `{"status": "ok"}` with HTTP 200.
 - **WebSockets on Render**: WebSockets work natively over HTTPS/WSS on the standard port at `wss://<your-service-name>.onrender.com/ws/{user_id}`.
+
+---
+
+## 4. Coturn Server Setup (WebRTC Relay)
+
+To allow calls to traverse symmetric NATs and mobile networks (CGNAT), run [Coturn](https://github.com/coturn/coturn) on a VPS or cloud instance with a public IP.
+
+In your `turnserver.conf`:
+```conf
+# Listening ports
+listening-port=3478
+tls-listening-port=5349
+
+# Public IP or domain
+realm=turn.yourdomain.com
+listening-ip=0.0.0.0
+external-ip=<your-public-server-ip>
+
+# Short-lived REST API credentials authentication
+use-auth-secret
+static-auth-secret=<matching-TURN_STATIC_AUTH_SECRET>
+
+# Security & logging
+fingerprint
+lt-cred-mech
+no-cli
+verbose
+```
+
+When clients call `GET /turn-credentials?user_id=<user_id>`, this backend generates an HMAC-SHA1 signature using `TURN_STATIC_AUTH_SECRET` that Coturn validates automatically when establishing the relay channel.
