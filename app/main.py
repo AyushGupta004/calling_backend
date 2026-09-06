@@ -58,6 +58,12 @@ def health():
     return {"status": "ok", "turn_configured": turn.is_turn_configured()}
 
 
+@app.head("/health")
+def health_head():
+    return
+
+
+
 
 if __name__ == "__main__":
     # Render injects the PORT environment variable

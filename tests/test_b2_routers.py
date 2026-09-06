@@ -1,35 +1,34 @@
-import json
 import os
 import sys
 import uuid
-import urllib.request
-import urllib.error
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from fastapi.testclient import TestClient
 from app.database import init_db
+from app.main import app
 
-BASE_URL = "http://127.0.0.1:8000"
+
+client = TestClient(app)
 
 
-def make_request(endpoint: str, method: str = "GET", data: dict = None):
-    url = f"{BASE_URL}{endpoint}"
-    headers = {"Content-Type": "application/json"}
-    body = json.dumps(data).encode("utf-8") if data is not None else None
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req) as resp:
-            resp_bytes = resp.read()
-            resp_body = resp_bytes.decode("utf-8") if resp_bytes else ""
-            return resp.status, json.loads(resp_body) if resp_body else None
-    except urllib.error.HTTPError as e:
-        err_bytes = e.read()
-        err_body = err_bytes.decode("utf-8") if err_bytes else ""
-        try:
-            parsed = json.loads(err_body)
-        except Exception:
-            parsed = err_body
-        return e.code, parsed
+def make_request(endpoint: str, method: str = "GET", data: dict = None, headers: dict = None):
+    req_headers = headers or {}
+    if data is not None and "Content-Type" not in req_headers:
+        req_headers["Content-Type"] = "application/json"
+
+    if method.upper() == "GET":
+        resp = client.get(endpoint, headers=req_headers)
+    elif method.upper() == "POST":
+        resp = client.post(endpoint, json=data, headers=req_headers)
+    elif method.upper() == "DELETE":
+        resp = client.delete(endpoint, headers=req_headers)
+    else:
+        resp = client.request(method, endpoint, json=data, headers=req_headers)
+
+    resp_body = resp.json() if resp.content else None
+    return resp.status_code, resp_body
+
 
 
 def run_tests():
