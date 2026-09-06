@@ -90,3 +90,36 @@ def test_voice_detection_returns_failure_for_invalid_scores():
         "success": False,
         "message": "Voice detection failed",
     }
+
+
+def test_voice_detection_parses_json_string_result():
+    with patch("app.routers.voice_detection.Client") as client_class:
+        client_class.return_value.predict.return_value = (
+            '{"success": true, "fake_probability": 0.1338, '
+            '"bonafide_score": 0.8662, "verdict": "REAL"}'
+        )
+        response = client.post(
+            "/voice-detection",
+            files={"file": ("caller.mp3", b"mp3 bytes", "audio/mpeg")},
+        )
+
+    assert response.json() == {
+        "success": True,
+        "fake_probability": 0.1338,
+        "bonafide_score": 0.8662,
+        "verdict": "REAL",
+    }
+
+
+def test_voice_detection_parses_nested_json_result():
+    with patch("app.routers.voice_detection.Client") as client_class:
+        client_class.return_value.predict.return_value = [
+            '{"success": true, "fake_probability": 0.1338, '
+            '"bonafide_score": 0.8662, "verdict": "REAL"}'
+        ]
+        response = client.post(
+            "/voice-detection",
+            files={"file": ("caller.mp3", b"mp3 bytes", "audio/mpeg")},
+        )
+
+    assert response.json()["verdict"] == "REAL"
