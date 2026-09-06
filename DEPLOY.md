@@ -117,17 +117,48 @@ sudo systemctl restart coturn
 
 ## 5. Render Environment Variables
 
+> [!IMPORTANT]
+> Because `render.yaml` sets `sync: false` on `TURN_HOST`, Render **will not automatically set or overwrite this variable for you**. You **must** manually set your real values in the Render Dashboard, otherwise the backend will remain unconfigured and issue STUN-only responses.
+
 In your [Render Dashboard](https://dashboard.render.com/) -> **calling-backend** -> **Environment**:
-1. `TURN_HOST`: Set to your server's public IP or domain (e.g. `203.0.113.10` or `turn.yourdomain.com`).
+1. `TURN_HOST`: Set to your real Coturn server's public IP or domain (e.g. `203.0.113.10` or `turn.yourdomain.com`).
 2. `TURN_STATIC_AUTH_SECRET`: Copy the generated secret from Render or paste your custom secret, ensuring it matches `static-auth-secret` in your `turnserver.conf`.
-3. Save and redeploy. The server boot log will show `TURN server relay configured at: <your-host>` instead of the unconfigured placeholder warning.
+3. Save Changes and trigger a manual redeploy. The server boot log will show `TURN server relay configured at: <your-host>` instead of the unconfigured placeholder warning.
 
 ---
 
 ## 6. End-to-End Verification
 
-### Method 1: WebRTC Trickle ICE (Browser)
-1. Query your deployed backend:
+### Method 1: Diagnostic Endpoint (`GET /turn-check`)
+Hit the diagnostic endpoint on your deployed backend:
+```bash
+curl https://<your-render-app>.onrender.com/turn-check
+```
+When configured and reachable, it returns:
+```json
+{
+  "turn_configured": true,
+  "turn_host": "<your-real-turn-host>",
+  "status": "healthy",
+  "udp_port_3478_probe": {
+    "reachable": true,
+    "note": "Received STUN response from TURN server on UDP port 3478"
+  }
+}
+```
+
+### Method 2: Standalone Diagnostic CLI Script
+Run the built-in diagnostic tool from your terminal:
+```bash
+# Test against your deployed Render service
+python scripts/check_turn.py --backend-url https://<your-render-app>.onrender.com
+
+# Or directly probe your TURN server's UDP port 3478
+python scripts/check_turn.py --turn-host <your-server-ip> --port 3478
+```
+
+### Method 3: WebRTC Trickle ICE (Browser)
+1. Query your deployed backend for credentials:
    ```bash
    curl https://<your-render-app>.onrender.com/turn-credentials?user_id=<registered-user-id>
    ```
@@ -141,10 +172,11 @@ In your [Render Dashboard](https://dashboard.render.com/) -> **calling-backend**
 6. Click **Add Server**, select the newly added server, and click **Gather candidates**.
 7. Confirm that a candidate with component **relay** appears in the results table (e.g. `typ relay raddr ...`).
 
-### Method 2: CLI verification using `turnutils_uclient`
+### Method 4: CLI verification using `turnutils_uclient`
 From any machine with the `coturn` package installed:
 ```bash
 turnutils_uclient -u "<generated_username>" -w "<generated_credential>" -e <your-server-ip> -p 3478 <your-server-ip>
 ```
 Confirm allocations succeed without `401 Unauthorized` or timeout errors.
+
 
