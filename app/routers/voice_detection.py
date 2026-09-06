@@ -14,32 +14,28 @@ def _failure_response() -> Dict[str, Any]:
     return {"success": False, "message": "Voice detection failed"}
 
 
-def _normalize_result(result: Any) -> Optional[Dict[str, Any]]:
+def _validate_result(result: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(result, dict) or result.get("success") is not True:
         return None
 
     verdict = result.get("verdict")
-    if not isinstance(verdict, str) or not verdict.strip():
+    if not isinstance(verdict, str) or verdict not in {"REAL", "FAKE"}:
         return None
 
-    normalized_verdict = verdict.strip().upper()
-    confidence_key = {
-        "FAKE": "fake_probability",
-        "BONAFIDE": "bonafide_score",
-    }.get(normalized_verdict)
-    if confidence_key is None:
-        return None
-
-    confidence = result.get(confidence_key)
-    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-        return None
-    if not math.isfinite(confidence):
+    scores = (result.get("fake_probability"), result.get("bonafide_score"))
+    if any(
+        isinstance(score, bool)
+        or not isinstance(score, (int, float))
+        or not math.isfinite(score)
+        for score in scores
+    ):
         return None
 
     return {
         "success": True,
-        "voice_type": verdict.strip(),
-        "confidence": confidence,
+        "fake_probability": result["fake_probability"],
+        "bonafide_score": result["bonafide_score"],
+        "verdict": result["verdict"],
     }
 
 
@@ -63,7 +59,7 @@ def detect_voice(file: Optional[UploadFile] = File(None)) -> Dict[str, Any]:
             audio_path=handle_file(temporary_path),
             api_name="/detect_voice",
         )
-        return _normalize_result(result) or _failure_response()
+        return _validate_result(result) or _failure_response()
     except Exception:
         return _failure_response()
     finally:
