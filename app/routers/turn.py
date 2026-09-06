@@ -24,12 +24,22 @@ DEFAULT_STATIC_AUTH_SECRET = "calling-backend-turn-secret-key"
 DEFAULT_TTL = 3600
 
 
+def is_turn_configured(turn_host: Optional[str] = None) -> bool:
+    """
+    Check if a real TURN host is configured.
+    Returns False if turn_host is empty, whitespace, or equals the placeholder 'turn.example.com'.
+    """
+    host = (turn_host if turn_host is not None else os.environ.get("TURN_HOST", DEFAULT_TURN_HOST)).strip()
+    return bool(host and host.lower() != DEFAULT_TURN_HOST.lower())
+
+
 def generate_coturn_rest_credentials(
     user_id: str,
     secret: str,
     turn_host: str,
     ttl: int = DEFAULT_TTL,
     stun_url: str = DEFAULT_STUN_URL,
+    turn_configured: Optional[bool] = None,
 ) -> TurnCredentialsResponse:
     """
     Generate short-lived Coturn REST API (draft-uberti-behave-turn-rest-00) credentials.
@@ -57,7 +67,14 @@ def generate_coturn_rest_credentials(
         ),
     ]
 
-    return TurnCredentialsResponse(iceServers=ice_servers, ttl=ttl)
+    if turn_configured is None:
+        turn_configured = is_turn_configured(turn_host)
+
+    return TurnCredentialsResponse(
+        iceServers=ice_servers,
+        ttl=ttl,
+        turnConfigured=turn_configured,
+    )
 
 
 @router.get("/turn-credentials", response_model=TurnCredentialsResponse)
@@ -96,10 +113,19 @@ def get_turn_credentials(
     env_ttl_str = os.environ.get("TURN_TTL")
     resolved_ttl = ttl or (int(env_ttl_str) if env_ttl_str and env_ttl_str.isdigit() else DEFAULT_TTL)
 
+    turn_configured = is_turn_configured(turn_host)
+    if not turn_configured:
+        logger.warning(
+            "Issuing TURN credentials with placeholder TURN_HOST ('%s'). WebRTC media relay will fail.",
+            turn_host,
+        )
+
     return generate_coturn_rest_credentials(
         user_id=user.id,
         secret=secret,
         turn_host=turn_host,
         ttl=resolved_ttl,
         stun_url=stun_url,
+        turn_configured=turn_configured,
     )
+

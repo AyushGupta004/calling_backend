@@ -1,3 +1,4 @@
+import logging
 import os
 import uvicorn
 from fastapi import FastAPI
@@ -7,6 +8,8 @@ import app.models  # Ensure models are registered on Base.metadata
 from app.database import Base, engine
 from app.routers import contacts, turn, users
 from app.ws import router as ws_router
+
+logger = logging.getLogger("calling.main")
 
 app = FastAPI(title="Calling App Signaling Backend")
 
@@ -22,8 +25,19 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup():
-    """Create all database tables on application startup."""
+    """Create all database tables on application startup and verify TURN configuration."""
     Base.metadata.create_all(bind=engine)
+
+    turn_host = os.environ.get("TURN_HOST", turn.DEFAULT_TURN_HOST).strip()
+    if not turn.is_turn_configured(turn_host):
+        logger.warning(
+            "⚠️  WARNING: TURN_HOST is not configured or using default placeholder ('%s'). "
+            "WebRTC media relay (TURN) will fail for peers on restrictive/mobile networks! "
+            "Configure TURN_HOST and TURN_STATIC_AUTH_SECRET in your environment.",
+            turn_host or "EMPTY",
+        )
+    else:
+        logger.info("TURN server relay configured at: %s", turn_host)
 
 
 # Include REST API and WebSocket Routers
@@ -41,7 +55,8 @@ def health_check():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "turn_configured": turn.is_turn_configured()}
+
 
 
 if __name__ == "__main__":

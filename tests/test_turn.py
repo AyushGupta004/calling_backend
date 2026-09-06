@@ -65,6 +65,11 @@ def run_tests():
     assert status == 200, f"Expected 200 OK, got {status}: {creds_1}"
     assert "iceServers" in creds_1, "Missing 'iceServers' in response"
     assert "ttl" in creds_1 and isinstance(creds_1["ttl"], int), "Missing or invalid 'ttl' in response"
+    assert "turnConfigured" in creds_1, "Missing 'turnConfigured' in response"
+    assert creds_1["turnConfigured"] is False, (
+        f"Expected turnConfigured=False when TURN_HOST is left at default placeholder, got {creds_1['turnConfigured']}"
+    )
+    print(f"[PASS] Correctly detected placeholder TURN server: turnConfigured={creds_1['turnConfigured']}")
 
     ice_servers = creds_1["iceServers"]
     assert len(ice_servers) >= 2, f"Expected at least 2 iceServers (STUN + TURN), got {len(ice_servers)}"
@@ -122,9 +127,37 @@ def run_tests():
     assert status == 200 and custom_ttl_resp["ttl"] == 7200
     print(f"[PASS] Custom TTL (7200) respected: {custom_ttl_resp['ttl']}")
 
+    print("\n--- 9. Testing Configured Real TURN Host (turnConfigured=True) ---")
+    orig_turn_host = os.environ.get("TURN_HOST")
+    try:
+        os.environ["TURN_HOST"] = "turn.production-relay.com"
+        status, configured_resp = make_request(f"/turn-credentials?user_id={user_id}", "GET")
+        assert status == 200, f"Expected 200 OK, got {status}: {configured_resp}"
+        assert configured_resp["turnConfigured"] is True, (
+            f"Expected turnConfigured=True for real TURN_HOST, got {configured_resp['turnConfigured']}"
+        )
+        turn_entry_configured = next(
+            (s for s in configured_resp["iceServers"] if isinstance(s.get("urls"), list) and any("turn.production-relay.com" in u for u in s["urls"])),
+            None
+        )
+        assert turn_entry_configured is not None, f"Expected custom TURN host in iceServers URLs: {configured_resp['iceServers']}"
+        print(f"[PASS] Real TURN host successfully reflected: turnConfigured=True, urls={turn_entry_configured['urls']}")
+    finally:
+        if orig_turn_host is not None:
+            os.environ["TURN_HOST"] = orig_turn_host
+        else:
+            os.environ.pop("TURN_HOST", None)
+
+    print("\n--- 10. Testing /health Endpoint TURN Status ---")
+    status, health_resp = make_request("/health", "GET")
+    assert status == 200, f"Expected 200 OK, got {status}: {health_resp}"
+    assert "turn_configured" in health_resp, f"Expected 'turn_configured' field in /health response, got {health_resp}"
+    print(f"[PASS] /health reports turn_configured: {health_resp['turn_configured']}")
+
     print("\n==============================================")
     print("ALL TURN CREDENTIALS REQUIREMENTS VERIFIED AND PASSED!")
     print("==============================================")
+
 
 
 def test_turn_credentials():

@@ -87,4 +87,6 @@ class IceServer(BaseModel):
 class TurnCredentialsResponse(BaseModel):
     iceServers: List[IceServer] = Field(..., description="List of STUN and TURN ICE servers")
     ttl: int = Field(..., description="Time to live in seconds for short-lived credentials")
+    turnConfigured: bool = Field(True, description="Indicates whether a real TURN server is configured (False if placeholder)")
+
 

@@ -59,7 +59,30 @@ This guide walks you through deploying the Calling App Signaling Backend to [Ren
 
 To allow calls to traverse symmetric NATs and mobile networks (CGNAT), run [Coturn](https://github.com/coturn/coturn) on a VPS or cloud instance with a public IP.
 
-In your `turnserver.conf`:
+### Firewall & Ports
+Ensure the following ports are allowed in your cloud provider's firewall / security groups:
+- `3478/udp` and `3478/tcp` (Standard STUN/TURN)
+- `5349/udp` and `5349/tcp` (STUN/TURN over TLS)
+- `49152-65535/udp` (Dynamic relay port range for WebRTC media streams)
+
+### Option A: Using Docker Compose (Recommended)
+A ready-to-run configuration is provided in the `coturn/` directory of this repo:
+1. Copy `coturn/` to your server.
+2. Edit `turnserver.conf`:
+   - Set `external-ip=<your-public-server-ip>`
+   - Set `realm=<your-domain-or-ip>`
+   - Set `static-auth-secret=<matching-TURN_STATIC_AUTH_SECRET>`
+3. Run:
+   ```bash
+   cd coturn
+   docker compose up -d
+   ```
+
+### Option B: Native System Package (Ubuntu / Debian)
+```bash
+sudo apt update && sudo apt install -y coturn
+```
+Edit `/etc/turnserver.conf`:
 ```conf
 # Listening ports
 listening-port=3478
@@ -74,11 +97,54 @@ external-ip=<your-public-server-ip>
 use-auth-secret
 static-auth-secret=<matching-TURN_STATIC_AUTH_SECRET>
 
+# Dynamic UDP relay ports
+min-port=49152
+max-port=65535
+
 # Security & logging
 fingerprint
 lt-cred-mech
 no-cli
 verbose
 ```
+Enable and start the service:
+```bash
+sudo systemctl enable coturn
+sudo systemctl restart coturn
+```
 
-When clients call `GET /turn-credentials?user_id=<user_id>`, this backend generates an HMAC-SHA1 signature using `TURN_STATIC_AUTH_SECRET` that Coturn validates automatically when establishing the relay channel.
+---
+
+## 5. Render Environment Variables
+
+In your [Render Dashboard](https://dashboard.render.com/) -> **calling-backend** -> **Environment**:
+1. `TURN_HOST`: Set to your server's public IP or domain (e.g. `203.0.113.10` or `turn.yourdomain.com`).
+2. `TURN_STATIC_AUTH_SECRET`: Copy the generated secret from Render or paste your custom secret, ensuring it matches `static-auth-secret` in your `turnserver.conf`.
+3. Save and redeploy. The server boot log will show `TURN server relay configured at: <your-host>` instead of the unconfigured placeholder warning.
+
+---
+
+## 6. End-to-End Verification
+
+### Method 1: WebRTC Trickle ICE (Browser)
+1. Query your deployed backend:
+   ```bash
+   curl https://<your-render-app>.onrender.com/turn-credentials?user_id=<registered-user-id>
+   ```
+2. Note the returned JSON payload:
+   - `turnConfigured` should be `true`.
+   - Copy the TURN URI: `turn:<your-host>:3478?transport=udp`
+   - Copy the `username` and `credential`.
+3. Open [WebRTC Trickle ICE](https://webrtc.github.io/samples/src/content/peerconnection/trickle-ice/).
+4. Under **STUN or TURN URI**, enter `turn:<your-host>:3478?transport=udp`.
+5. Enter the `username` and `password` (credential).
+6. Click **Add Server**, select the newly added server, and click **Gather candidates**.
+7. Confirm that a candidate with component **relay** appears in the results table (e.g. `typ relay raddr ...`).
+
+### Method 2: CLI verification using `turnutils_uclient`
+From any machine with the `coturn` package installed:
+```bash
+turnutils_uclient -u "<generated_username>" -w "<generated_credential>" -e <your-server-ip> -p 3478 <your-server-ip>
+```
+Confirm allocations succeed without `401 Unauthorized` or timeout errors.
+
