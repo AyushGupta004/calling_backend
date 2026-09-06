@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -70,3 +70,21 @@ class SignalingMessage(BaseModel):
     reason: Optional[str] = None
 
     model_config = ConfigDict(extra="allow")
+
+
+# ---------------------------------------------------------
+# TURN / ICE Server Schemas
+# ---------------------------------------------------------
+
+class IceServer(BaseModel):
+    urls: Union[str, List[str]] = Field(..., description="STUN/TURN server URL or list of URLs")
+    username: Optional[str] = Field(None, description="Username for TURN authentication")
+    credential: Optional[str] = Field(None, description="Credential/password for TURN authentication")
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class TurnCredentialsResponse(BaseModel):
+    iceServers: List[IceServer] = Field(..., description="List of STUN and TURN ICE servers")
+    ttl: int = Field(..., description="Time to live in seconds for short-lived credentials")
+

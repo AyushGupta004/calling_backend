@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import app.models  # Ensure models are registered on Base.metadata
 from app.database import Base, engine
-from app.routers import contacts, users
+from app.routers import contacts, turn, users
 from app.ws import router as ws_router
 
 app = FastAPI(title="Calling App Signaling Backend")
@@ -29,6 +29,7 @@ def on_startup():
 # Include REST API and WebSocket Routers
 app.include_router(users.router)
 app.include_router(contacts.router)
+app.include_router(turn.router)
 app.include_router(ws_router)
 
 

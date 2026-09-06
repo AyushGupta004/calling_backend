@@ -13,6 +13,10 @@ services:
           property: connectionString
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: TURN_HOST
+        value: turn.example.com
+      - key: TURN_STATIC_AUTH_SECRET
+        generateValue: true
 
 # Managed PostgreSQL Database on Render
 databases:

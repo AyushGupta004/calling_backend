@@ -13,13 +13,15 @@ calling_backend/
 │   ├── main.py                  # FastAPI app setup, CORS, lifespan DB initialization, router mounts
 │   ├── database.py              # SQLAlchemy engine/session, auto-fixes Render postgres://, get_db()
 │   ├── models.py                # User & Contact SQLAlchemy models with constraints
-│   ├── schemas.py               # Pydantic v2 schemas for requests, responses & signaling
+│   ├── schemas.py               # Pydantic v2 schemas for requests, responses, TURN & signaling
 │   ├── connection_manager.py    # In-memory WebSocket connection registry & presence tracking
 │   ├── ws.py                    # Real-time WebSocket endpoint (/ws/{user_id}) & call routing
 │   └── routers/
 │       ├── __init__.py
 │       ├── users.py             # User registration, search, and online status
-│       └── contacts.py          # Contact list management (add, list, delete)
+│       ├── contacts.py          # Contact list management (add, list, delete)
+│       └── turn.py              # Short-lived TURN REST API credentials (Coturn HMAC-SHA1)
+├── .env.example                 # Environment variables template
 ├── main.py                      # Root entrypoint re-exporting app for uvicorn
 ├── render.yaml                  # Infrastructure-as-Code blueprint for Render (Web + PostgreSQL)
 └── requirements.txt             # Project dependencies
@@ -92,6 +94,58 @@ calling_backend/
    - Under **Environment Variables**, add:
      - `DATABASE_URL`: *(paste the Internal Database URL from step 1)*
    - `database.py` automatically handles converting `postgres://` to `postgresql://` required by SQLAlchemy 2.0.
+
+---
+
+## TURN / ICE Credentials (`GET /turn-credentials`)
+
+When peers are behind symmetric NATs or carrier-grade NATs (CGNAT) common on mobile data networks, direct P2P connections and public STUN servers fail (WebRTC ICE gets stuck at `checking` → `disconnected`). This endpoint issues dynamic, short-lived Coturn REST API (RFC 5766 / draft-uberti-behave-turn-rest-00) credentials so clients never hardcode credentials.
+
+### Authentication
+Requests must be authenticated by a known, registered `user_id`, passed either as:
+- **Query Parameter**: `GET /turn-credentials?user_id=<user_id>` (optional `&ttl=3600`)
+- **Header**: `GET /turn-credentials` with `X-User-Id: <user_id>`
+
+Unauthenticated requests return `HTTP 401 Unauthorized`. Non-existent user IDs return `HTTP 404 Not Found`.
+
+### Credential Generation Mechanism
+- **Username**: `{timestamp_seconds}:{user_id}` (where `timestamp_seconds = int(time.time()) + ttl`)
+- **Credential**: `base64(HMAC-SHA1(static_auth_secret, username))`
+
+Because the username encodes the expiration epoch, credentials dynamically change across calls and are automatically validated by Coturn's static-auth-secret mechanism without database lookups.
+
+### Response Payload
+```json
+{
+  "iceServers": [
+    {
+      "urls": "stun:stun.l.google.com:19302"
+    },
+    {
+      "urls": [
+        "turn:turn.example.com:3478?transport=udp",
+        "turn:turn.example.com:3478?transport=tcp",
+        "turns:turn.example.com:5349?transport=tcp"
+      ],
+      "username": "1788693290:2f94edeb-6563-4819-8654-5daf97563c79",
+      "credential": "sBHA06avwyHEQddZIj+oKCeaxtw="
+    }
+  ],
+  "ttl": 3600
+}
+```
+
+---
+
+## Environment Variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `DATABASE_URL` | PostgreSQL or SQLite connection string | `sqlite:///./calling_app.db` |
+| `TURN_HOST` | Hostname or IP of the Coturn server | `turn.example.com` |
+| `TURN_STATIC_AUTH_SECRET` | Shared secret configured in Coturn (`static-auth-secret`) | `calling-backend-turn-secret-key` |
+| `TURN_TTL` | Credential validity duration in seconds | `3600` |
+| `STUN_URL` | Public STUN server URL | `stun:stun.l.google.com:19302` |
 
 ---
 
