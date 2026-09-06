@@ -4,3 +4,5 @@ sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.9
 python-dotenv>=1.0.0
 httpx>=0.28.0
+gradio_client>=2.6.1
+python-multipart>=0.0.20

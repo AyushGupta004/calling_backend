@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import app.models
 from app.database import Base, engine
-from app.routers import contacts, users
+from app.routers import contacts, users, voice_detection
 from app.ws import router as ws_router
 
 
@@ -26,6 +26,7 @@ def on_startup():
 
 app.include_router(users.router)
 app.include_router(contacts.router)
+app.include_router(voice_detection.router)
 app.include_router(ws_router)
 
 
