@@ -1,6 +1,7 @@
+import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from fastapi import WebSocket
 
 logger = logging.getLogger("signaling.manager")
@@ -19,6 +20,10 @@ class ConnectionManager:
         # user_id (str) -> busy_call_id (str or None)
         # Enforces: users cannot participate in multiple active calls simultaneously
         self.busy_status: Dict[str, Optional[str]] = {}
+
+        # Concurrency lock to prevent race conditions during call setup
+        self.lock = asyncio.Lock()
+
 
     async def connect(self, user_id: str, websocket: WebSocket):
         """
@@ -109,7 +114,7 @@ class ConnectionManager:
 
     def set_call_participants(self, caller_id: str, callee_id: str, call_id: str) -> bool:
         """
-        Atomically mark both participants busy for call_id if neither is busy.
+        Mark both participants busy for call_id if neither is busy.
         Returns True if both successfully marked busy, False if either is already busy.
         """
         if self.is_busy(caller_id) or self.is_busy(callee_id):
@@ -118,6 +123,30 @@ class ConnectionManager:
         self.set_busy(caller_id, call_id)
         self.set_busy(callee_id, call_id)
         return True
+
+    async def try_initiate_call(
+        self, caller_id: str, callee_id: str, call_id: str
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Atomically verify that caller and callee are online and not busy under asyncio.Lock.
+        Prevents race condition where concurrent call_requests double-assign a user.
+        Returns:
+            (True, None) if call was successfully initiated and both users marked busy.
+            (False, "busy") if caller or callee is already busy.
+            (False, "offline") if callee is offline.
+        """
+        async with self.lock:
+            if self.is_busy(caller_id):
+                return False, "busy"
+            if not self.is_online(callee_id):
+                return False, "offline"
+            if self.is_busy(callee_id):
+                return False, "busy"
+
+            self.set_busy(caller_id, call_id)
+            self.set_busy(callee_id, call_id)
+            return True, None
+
 
     def get_call_partner(self, user_id: str) -> Optional[str]:
         """Find the user ID of the other participant in the user's active call, or None."""

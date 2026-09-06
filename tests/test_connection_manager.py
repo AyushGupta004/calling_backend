@@ -99,6 +99,34 @@ class TestConnectionManager(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.cm.is_busy("charlie"))
         self.assertTrue(self.cm.is_busy("alice"))
 
+    async def test_concurrent_call_requests_race_condition(self):
+        """Verify that concurrent calls to the same user cannot double-assign under asyncio."""
+        mock_a = AsyncMock()
+        mock_b = AsyncMock()
+        mock_c = AsyncMock()
+        await self.cm.connect("alice", mock_a)
+        await self.cm.connect("bob", mock_b)
+        await self.cm.connect("charlie", mock_c)
+
+        # Alice calls Bob, and Charlie calls Bob at the exact same moment
+        res_a, res_c = await asyncio.gather(
+            self.cm.try_initiate_call("alice", "bob", "call_a_b"),
+            self.cm.try_initiate_call("charlie", "bob", "call_c_b"),
+        )
+
+        # Exactly ONE must succeed and the other must fail with 'busy'
+        successes = [r for r in [res_a, res_c] if r[0] is True]
+        failures = [r for r in [res_a, res_c] if r[0] is False]
+
+        self.assertEqual(len(successes), 1, "Exactly one concurrent call must succeed")
+        self.assertEqual(len(failures), 1, "The other concurrent call must fail")
+        self.assertEqual(failures[0][1], "busy", "Failure reason must be 'busy'")
+
+        # Bob must be assigned to the winning call, never double-assigned
+        winning_call = self.cm.get_busy_call_id("bob")
+        self.assertIn(winning_call, ["call_a_b", "call_c_b"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

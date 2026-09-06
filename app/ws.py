@@ -65,29 +65,18 @@ async def websocket_signaling_endpoint(
                 if not to_user_id:
                     continue
 
-                # Check: is the caller already busy?
-                if manager.is_busy(user_id):
-                    logger.info(f"[Signaling] system -> {user_id} | type='call_failed' | reason='busy'")
-                    await manager.send_to(user_id, {"type": "call_failed", "reason": "busy"})
-                    continue
-
-                # Check: is to_user_id online?
-                if not manager.is_online(to_user_id):
-                    logger.info(f"[Signaling] system -> {user_id} | type='call_failed' | reason='offline'")
-                    await manager.send_to(user_id, {"type": "call_failed", "reason": "offline"})
-                    continue
-
-                # Check: is to_user_id already busy?
-                if manager.is_busy(to_user_id):
-                    logger.info(f"[Signaling] system -> {user_id} | type='call_failed' | reason='busy'")
-                    await manager.send_to(user_id, {"type": "call_failed", "reason": "busy"})
-                    continue
-
-                # Generate call_id and mark BOTH users as busy
                 call_id = str(uuid.uuid4())
-                manager.set_call_participants(user_id, to_user_id, call_id)
+
+                # Atomically check online/busy status and register call_id under asyncio.Lock
+                success, fail_reason = await manager.try_initiate_call(user_id, to_user_id, call_id)
+                if not success:
+                    logger.info(f"[Signaling] system -> {user_id} | type='call_failed' | reason='{fail_reason}'")
+                    await manager.send_to(user_id, {"type": "call_failed", "reason": fail_reason})
+                    continue
+
                 active_call_id = call_id
                 call_partner_id = to_user_id
+
 
                 # Extract or query caller_name
                 caller_name = message.get("caller_name")
