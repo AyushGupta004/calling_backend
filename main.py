@@ -3,7 +3,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-import app.models  # Ensure models are registered on Base.metadata
+import app.models
 from app.database import Base, engine
 from app.routers import contacts, users
 from app.ws import router as ws_router
@@ -41,6 +41,11 @@ def health_check():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.head("/health")
+def health_head():
+    return
 
 
 if __name__ == "__main__":
