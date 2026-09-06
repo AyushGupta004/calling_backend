@@ -1,7 +1,6 @@
 import asyncio
 import os
 import sys
-import time
 import unittest
 from unittest.mock import AsyncMock
 
@@ -11,160 +10,53 @@ from app.connection_manager import ConnectionManager
 
 
 class TestConnectionManager(unittest.IsolatedAsyncioTestCase):
-
     async def asyncSetUp(self):
-        self.cm = ConnectionManager()
+        self.manager = ConnectionManager()
+        self.alice_socket = AsyncMock()
+        self.bob_socket = AsyncMock()
+        await self.manager.connect("alice", self.alice_socket)
+        await self.manager.connect("bob", self.bob_socket)
 
-    async def test_connect_and_is_online(self):
-        mock_ws = AsyncMock()
-        await self.cm.connect("user_1", mock_ws)
+    async def test_backend_creates_one_call_and_tracks_state(self):
+        call, reason = await self.manager.create_call("alice", "bob")
 
-        mock_ws.accept.assert_awaited_once()
-        self.assertTrue(self.cm.is_online("user_1"))
-        self.assertFalse(self.cm.is_online("user_2"))
-        self.assertIn("user_1", self.cm.active_connections)
-        self.assertIsNone(self.cm.busy_status.get("user_1"))
+        self.assertIsNone(reason)
+        self.assertIsNotNone(call)
+        self.assertEqual(call.state, "ringing")
+        self.assertEqual(self.manager.get_call(call.call_id), call)
+        self.assertEqual(self.manager.get_busy_call_id("alice"), call.call_id)
+        self.assertEqual(self.manager.get_busy_call_id("bob"), call.call_id)
 
-    async def test_disconnect(self):
-        mock_ws = AsyncMock()
-        await self.cm.connect("user_1", mock_ws)
-        self.cm.set_busy("user_1", "call_123")
+    async def test_busy_and_offline_are_rejected(self):
+        call, _ = await self.manager.create_call("alice", "bob")
+        self.assertIsNotNone(call)
 
-        self.assertTrue(self.cm.is_online("user_1"))
-        self.assertEqual(self.cm.get_busy_call_id("user_1"), "call_123")
+        busy_call, busy_reason = await self.manager.create_call("alice", "bob")
+        offline_call, offline_reason = await self.manager.create_call("charlie", "offline")
 
-        # Disconnect removes user and clears busy status
-        self.cm.disconnect("user_1")
-        self.assertFalse(self.cm.is_online("user_1"))
-        self.assertNotIn("user_1", self.cm.active_connections)
-        self.assertNotIn("user_1", self.cm.busy_status)
+        self.assertIsNone(busy_call)
+        self.assertEqual(busy_reason, "busy")
+        self.assertIsNone(offline_call)
+        self.assertEqual(offline_reason, "offline")
 
-    async def test_send_to_online_user(self):
-        mock_ws = AsyncMock()
-        await self.cm.connect("user_1", mock_ws)
+    async def test_end_call_clears_both_users(self):
+        call, _ = await self.manager.create_call("alice", "bob")
+        self.manager.end_call(call.call_id)
 
-        success = await self.cm.send_to("user_1", {"type": "test", "data": 42})
-        self.assertTrue(success)
-        mock_ws.send_text.assert_awaited_once()
-        payload = mock_ws.send_text.call_args[0][0]
-        self.assertIn('"type": "test"', payload)
+        self.assertIsNone(self.manager.get_call(call.call_id))
+        self.assertFalse(self.manager.is_busy("alice"))
+        self.assertFalse(self.manager.is_busy("bob"))
 
-    async def test_send_to_offline_user_returns_false_silently(self):
-        # Must return False silently, never raise
-        success = await self.cm.send_to("non_existent_user", {"type": "ping"})
-        self.assertFalse(success)
+    async def test_old_socket_cannot_disconnect_new_socket(self):
+        old_socket = self.alice_socket
+        new_socket = AsyncMock()
+        await self.manager.connect("alice", new_socket)
 
-    async def test_send_to_broken_socket_returns_false_silently(self):
-        mock_ws = AsyncMock()
-        mock_ws.send_text.side_effect = RuntimeError("Broken pipe")
-        await self.cm.connect("user_broken", mock_ws)
+        self.manager.disconnect("alice", old_socket)
 
-        # Should catch exception, clean up, and return False silently
-        success = await self.cm.send_to("user_broken", {"type": "ping"})
-        self.assertFalse(success)
-        self.assertFalse(self.cm.is_online("user_broken"))
-
-    def test_busy_call_enforcement(self):
-        # 1. Initially users are not busy
-        self.assertFalse(self.cm.is_busy("alice"))
-        self.assertFalse(self.cm.is_busy("bob"))
-        self.assertFalse(self.cm.is_busy("charlie"))
-
-        # 2. Alice calls Bob
-        call_id_1 = "call_alice_bob_001"
-        success = self.cm.set_call_participants("alice", "bob", call_id_1)
-        self.assertTrue(success)
-
-        # Both are now marked busy with call_id_1
-        self.assertTrue(self.cm.is_busy("alice"))
-        self.assertTrue(self.cm.is_busy("bob"))
-        self.assertEqual(self.cm.get_busy_call_id("alice"), call_id_1)
-        self.assertEqual(self.cm.get_busy_call_id("bob"), call_id_1)
-
-        # 3. Charlie tries to call Alice while Alice is in call_id_1
-        call_id_2 = "call_charlie_alice_002"
-        attempt = self.cm.set_call_participants("charlie", "alice", call_id_2)
-        # Must reject: cannot participate in multiple active calls simultaneously
-        self.assertFalse(attempt)
-        self.assertFalse(self.cm.is_busy("charlie"))
-        self.assertEqual(self.cm.get_busy_call_id("alice"), call_id_1)
-
-        # 4. End call_id_1
-        self.cm.end_call(call_id_1)
-        self.assertFalse(self.cm.is_busy("alice"))
-        self.assertFalse(self.cm.is_busy("bob"))
-
-        # 5. Now Charlie can call Alice
-        success_2 = self.cm.set_call_participants("charlie", "alice", call_id_2)
-        self.assertTrue(success_2)
-        self.assertTrue(self.cm.is_busy("charlie"))
-        self.assertTrue(self.cm.is_busy("alice"))
-
-    async def test_concurrent_call_requests_race_condition(self):
-        """Verify that concurrent calls to the same user cannot double-assign under asyncio."""
-        mock_a = AsyncMock()
-        mock_b = AsyncMock()
-        mock_c = AsyncMock()
-        await self.cm.connect("alice", mock_a)
-        await self.cm.connect("bob", mock_b)
-        await self.cm.connect("charlie", mock_c)
-
-        # Alice calls Bob, and Charlie calls Bob at the exact same moment
-        res_a, res_c = await asyncio.gather(
-            self.cm.try_initiate_call("alice", "bob", "call_a_b"),
-            self.cm.try_initiate_call("charlie", "bob", "call_c_b"),
-        )
-
-        # Exactly ONE must succeed and the other must fail with 'busy'
-        successes = [r for r in [res_a, res_c] if r[0] is True]
-        failures = [r for r in [res_a, res_c] if r[0] is False]
-
-        self.assertEqual(len(successes), 1, "Exactly one concurrent call must succeed")
-        self.assertEqual(len(failures), 1, "The other concurrent call must fail")
-        self.assertEqual(failures[0][1], "busy", "Failure reason must be 'busy'")
-
-        # Bob must be assigned to the winning call, never double-assigned
-        winning_call = self.cm.get_busy_call_id("bob")
-        self.assertIn(winning_call, ["call_a_b", "call_c_b"])
-
-
-    async def test_call_start_times_tracking(self):
-        # 1. Test set_call_participants records call_start_times
-        call_id = "test_call_start_time_01"
-        self.cm.set_call_participants("u1", "u2", call_id)
-        self.assertIn(call_id, self.cm.call_start_times)
-        self.assertIsInstance(self.cm.call_start_times[call_id], float)
-
-        # 2. Test end_call removes call_start_times
-        self.cm.end_call(call_id)
-        self.assertNotIn(call_id, self.cm.call_start_times)
-
-        # 3. Test try_initiate_call records call_start_times
-        mock1 = AsyncMock()
-        mock2 = AsyncMock()
-        await self.cm.connect("u3", mock1)
-        await self.cm.connect("u4", mock2)
-        call_id_2 = "test_call_start_time_02"
-        success, _ = await self.cm.try_initiate_call("u3", "u4", call_id_2)
-        self.assertTrue(success)
-        self.assertIn(call_id_2, self.cm.call_start_times)
-
-        self.cm.end_call(call_id_2)
-        self.assertNotIn(call_id_2, self.cm.call_start_times)
-
-    async def test_clear_stale_calls_clears_busy_state(self):
-        call_id = "stale_call"
-        self.cm.set_call_participants("u1", "u2", call_id)
-        self.cm.call_start_times[call_id] = time.time() - (2 * 60 * 60 + 1)
-
-        cleared = self.cm.clear_stale_calls()
-
-        self.assertEqual(cleared, [call_id])
-        self.assertFalse(self.cm.is_busy("u1"))
-        self.assertFalse(self.cm.is_busy("u2"))
-        self.assertNotIn(call_id, self.cm.call_start_times)
+        self.assertTrue(self.manager.is_current_connection("alice", new_socket))
+        self.assertTrue(self.manager.is_online("alice"))
 
 
 if __name__ == "__main__":
     unittest.main()
-

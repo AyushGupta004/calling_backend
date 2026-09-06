@@ -1,234 +1,172 @@
 import json
 import logging
-import uuid
-from typing import Optional
+from typing import Dict
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
-from app.connection_manager import manager
-from app.database import SessionLocal
-from app.models import User
+from app.connection_manager import Call, manager
+
 
 logger = logging.getLogger("signaling.ws")
-
-
 router = APIRouter(tags=["Signaling WebSocket"])
 
 
+def _call_error(reason: str) -> Dict[str, str]:
+    return {"type": "call_failed", "reason": reason}
+
+
+async def _send_call_ended(call: Call, sender_id: str):
+    partner_id = call.receiver_id if call.caller_id == sender_id else call.caller_id
+    logger.info(
+        "[Signaling] %s -> %s | type='call_ended' | call_id='%s'",
+        sender_id,
+        partner_id,
+        call.call_id,
+    )
+    await manager.send_to(partner_id, {"type": "call_ended", "call_id": call.call_id})
+
+
 @router.websocket("/ws/{user_id}")
-async def websocket_signaling_endpoint(
-    websocket: WebSocket,
-    user_id: str,
-):
-    """
-    WebSocket endpoint /ws/{user_id} for WebRTC signaling and call state management.
-    Registers user on connect (skips presence broadcast).
-    """
+async def websocket_signaling_endpoint(websocket: WebSocket, user_id: str):
     user_id = user_id.strip()
     if not user_id:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="user_id is required")
         return
 
-    # On connect: register user as online (skipping online presence broadcast)
     await manager.connect(user_id, websocket)
-
-    active_call_id: Optional[str] = None
-    call_partner_id: Optional[str] = None
 
     try:
         while True:
-            raw_data = await websocket.receive_text()
-
-            # Robust JSON parsing: do not crash on malformed payloads
             try:
-                message = json.loads(raw_data)
-            except Exception:
-                logger.warning(f"Dropped malformed JSON from user {user_id}")
+                message = json.loads(await websocket.receive_text())
+            except json.JSONDecodeError:
+                logger.warning("[Signaling] Dropped malformed JSON from user '%s'", user_id)
                 continue
 
             if not isinstance(message, dict):
                 continue
 
-            msg_type = message.get("type")
-            if not msg_type:
+            message_type = message.get("type")
+            if message_type == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
+            if not message_type:
                 continue
 
-            # Heartbeat ping/pong support
-            if msg_type == "ping":
-                await websocket.send_text(json.dumps({"type": "pong"}))
-                continue
-
-            # ---------------------------------------------------------
-            # 1. "call_request" — {type, to_user_id, from_user_id, caller_name}
-            # ---------------------------------------------------------
-            if msg_type in ("call_request", "call-request"):
-                to_user_id = message.get("to_user_id") or message.get("target_user_id")
-                if not to_user_id:
+            if message_type == "call_request":
+                receiver_id = str(message.get("to_user_id", "")).strip()
+                logger.info("[Signaling] %s -> %s | type='call_request'", user_id, receiver_id)
+                if not receiver_id:
                     continue
 
-                logger.info(f"[Signaling] {user_id} -> {to_user_id} | type='call_request'")
-
-                call_id = str(uuid.uuid4())
-
-                # Atomically check online/busy status and register call_id under asyncio.Lock
-                success, fail_reason = await manager.try_initiate_call(user_id, to_user_id, call_id)
-                if not success:
-                    logger.info(f"[Signaling] system -> {user_id} | type='call_failed' | reason='{fail_reason}'")
-                    await manager.send_to(user_id, {"type": "call_failed", "reason": fail_reason})
+                call, reason = await manager.create_call(user_id, receiver_id)
+                if call is None:
+                    logger.info(
+                        "[Signaling] system -> %s | type='call_failed' | reason='%s'",
+                        user_id,
+                        reason,
+                    )
+                    await manager.send_to(user_id, _call_error(reason or "unavailable"))
                     continue
 
-                active_call_id = call_id
-                call_partner_id = to_user_id
-
-
-                # Extract or query caller_name
-                caller_name = message.get("caller_name")
-                if not caller_name:
-                    try:
-                        with SessionLocal() as db:
-                            user_record = db.query(User).filter(User.id == user_id).first()
-                            if user_record and user_record.name:
-                                caller_name = user_record.name
-                    except Exception as db_err:
-                        logger.debug(f"Could not query caller name for user {user_id}: {db_err}")
-
-                incoming_payload = {
+                incoming = {
                     "type": "incoming_call",
+                    "call_id": call.call_id,
                     "from_user_id": user_id,
-                    "call_id": call_id,
                 }
-                if caller_name:
-                    incoming_payload["caller_name"] = caller_name
-
                 logger.info(
-                    f"[Signaling] {user_id} -> {to_user_id} | type='incoming_call' | call_id='{call_id}'"
-                    + (f" | caller_name='{caller_name}'" if caller_name else "")
+                    "[Signaling] %s -> %s | type='incoming_call' | call_id='%s'",
+                    user_id,
+                    receiver_id,
+                    call.call_id,
                 )
-
-                # Relay to receiver
-                delivered = await manager.send_to(to_user_id, incoming_payload)
-                if not delivered:
-                    # In case receiver disconnected in the exact race window
-                    manager.end_call(call_id)
-                    active_call_id = None
-                    call_partner_id = None
-                    logger.info(f"[Signaling] system -> {user_id} | type='call_failed' | reason='offline'")
-                    await manager.send_to(user_id, {"type": "call_failed", "reason": "offline"})
-
-            # ---------------------------------------------------------
-            # 2. "call_accepted" — {type, call_id, to_user_id}
-            # ---------------------------------------------------------
-            elif msg_type in ("call_accepted", "call-accepted", "call-accept"):
-                call_id = message.get("call_id") or active_call_id
-                to_user_id = message.get("to_user_id") or message.get("target_user_id") or call_partner_id
-
-                if call_id and to_user_id:
-                    active_call_id = call_id
-                    call_partner_id = to_user_id
-                    logger.info(f"[Signaling] {user_id} -> {to_user_id} | type='call_accepted' | call_id='{call_id}'")
-                    # Relay to caller
-                    await manager.send_to(
-                        to_user_id,
-                        {
-                            "type": "call_accepted",
-                            "call_id": call_id,
-                        },
-                    )
-
-            # ---------------------------------------------------------
-            # 3. "call_rejected" — {type, call_id, to_user_id}
-            # ---------------------------------------------------------
-            elif msg_type in ("call_rejected", "call-rejected", "call-reject"):
-                call_id = message.get("call_id") or active_call_id
-                to_user_id = message.get("to_user_id") or message.get("target_user_id") or call_partner_id
-
-                if call_id and to_user_id:
-                    logger.info(f"[Signaling] {user_id} -> {to_user_id} | type='call_rejected' | call_id='{call_id}'")
-                    # Relay to caller
-                    await manager.send_to(
-                        to_user_id,
-                        {
-                            "type": "call_rejected",
-                            "call_id": call_id,
-                        },
-                    )
-
-                # Clear busy status for both users tied to this call_id
-                if call_id:
-                    manager.end_call(call_id)
-                manager.clear_busy(user_id)
-                active_call_id = None
-                call_partner_id = None
-
-            # ---------------------------------------------------------
-            # 4. "call_ended" — {type, call_id, to_user_id}
-            # ---------------------------------------------------------
-            elif msg_type in ("call_ended", "call-ended", "hang-up", "hang_up"):
-                call_id = message.get("call_id") or active_call_id or manager.get_busy_call_id(user_id)
-                to_user_id = message.get("to_user_id") or message.get("target_user_id") or call_partner_id or manager.get_call_partner(user_id)
-
-                if call_id and to_user_id:
-                    logger.info(f"[Signaling] {user_id} -> {to_user_id} | type='call_ended' | call_id='{call_id}'")
-                    # Relay to the other party
-                    await manager.send_to(
-                        to_user_id,
-                        {
-                            "type": "call_ended",
-                            "call_id": call_id,
-                        },
-                    )
-
-                # Clear busy status for both users tied to this call_id
-                if call_id:
-                    manager.end_call(call_id)
-                manager.clear_busy(user_id)
-                active_call_id = None
-                call_partner_id = None
-
-            # ---------------------------------------------------------
-            # 5. "offer" / "answer" / "ice-candidate" (aliases: "ice_candidate", "candidate")
-            # ---------------------------------------------------------
-            elif msg_type in ("offer", "answer", "ice_candidate", "ice-candidate", "candidate"):
-                call_id = message.get("call_id") or active_call_id
-                to_user_id = message.get("to_user_id") or message.get("target_user_id") or call_partner_id
-
-                # Validate the sender is actually part of an active call with this call_id
-                user_busy_call = manager.get_busy_call_id(user_id)
-                if not user_busy_call or user_busy_call != call_id:
-                    logger.warning(
-                        f"Ignored signaling '{msg_type}' from {user_id}: not part of active call '{call_id}'"
-                    )
+                if not await manager.send_to(receiver_id, incoming):
+                    manager.end_call(call.call_id)
+                    await manager.send_to(user_id, _call_error("offline"))
                     continue
 
-                if to_user_id:
-                    logger.info(f"[Signaling] {user_id} -> {to_user_id} | type='{msg_type}' | call_id='{call_id}'")
-                    # Relay full payload directly to that user's active socket
-                    await manager.send_to(to_user_id, message)
+                await manager.send_to(
+                    user_id,
+                    {"type": "call_started", "call_id": call.call_id, "to_user_id": receiver_id},
+                )
+                continue
 
-            else:
-                logger.info(f"Unrecognized message type '{msg_type}' from user '{user_id}'")
+            call_id = message.get("call_id")
+            call = manager.get_call(call_id) if isinstance(call_id, str) else None
+
+            if message_type == "call_accepted":
+                if call is None or call.state != "ringing" or call.receiver_id != user_id:
+                    await manager.send_to(user_id, _call_error("invalid_call"))
+                    continue
+                manager.set_state(call.call_id, "accepted")
+                logger.info(
+                    "[Signaling] %s -> %s | type='call_accepted' | call_id='%s'",
+                    user_id,
+                    call.caller_id,
+                    call.call_id,
+                )
+                await manager.send_to(call.caller_id, {"type": "call_accepted", "call_id": call.call_id})
+                continue
+
+            if message_type == "call_rejected":
+                if call is None or call.state != "ringing" or call.receiver_id != user_id:
+                    await manager.send_to(user_id, _call_error("invalid_call"))
+                    continue
+                logger.info(
+                    "[Signaling] %s -> %s | type='call_rejected' | call_id='%s'",
+                    user_id,
+                    call.caller_id,
+                    call.call_id,
+                )
+                await manager.send_to(call.caller_id, {"type": "call_rejected", "call_id": call.call_id})
+                manager.end_call(call.call_id)
+                continue
+
+            if message_type == "call_ended":
+                if call is None or not manager.is_participant(call.call_id, user_id):
+                    await manager.send_to(user_id, _call_error("invalid_call"))
+                    continue
+                await _send_call_ended(call, user_id)
+                manager.end_call(call.call_id)
+                continue
+
+            if message_type in {"offer", "answer", "ice_candidate"}:
+                if call is None or not manager.is_participant(call.call_id, user_id):
+                    logger.warning(
+                        "[Signaling] Ignored %s from '%s' for unauthorized call '%s'",
+                        message_type,
+                        user_id,
+                        call_id,
+                    )
+                    continue
+                if call.state not in {"accepted", "connected"}:
+                    await manager.send_to(user_id, _call_error("call_not_accepted"))
+                    continue
+
+                partner_id = manager.get_call_partner(user_id)
+                if partner_id is None:
+                    continue
+                manager.set_state(call.call_id, "connected")
+                logger.info(
+                    "[Signaling] %s -> %s | type='%s' | call_id='%s'",
+                    user_id,
+                    partner_id,
+                    message_type,
+                    call.call_id,
+                )
+                await manager.send_to(partner_id, message)
+                continue
+
+            logger.info("[Signaling] Unrecognized message type '%s' from '%s'", message_type, user_id)
 
     except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for user: {user_id}")
-    except Exception as e:
-        logger.error(f"WebSocket error for user {user_id}: {e}")
+        logger.info("[Signaling] WebSocket disconnected for user '%s'", user_id)
+    except Exception as exc:
+        logger.error("[Signaling] WebSocket error for user '%s': %s", user_id, exc)
     finally:
-        # If user was in an active call, send call_ended to call partner
-        call_id = manager.get_busy_call_id(user_id) or active_call_id
-        partner_id = manager.get_call_partner(user_id) or call_partner_id
-
-        if call_id and partner_id:
-            logger.info(f"[Signaling] system -> {partner_id} | type='call_ended' | reason='peer_disconnected' | call_id='{call_id}'")
-            await manager.send_to(
-                partner_id,
-                {
-                    "type": "call_ended",
-                    "reason": "peer_disconnected",
-                    "call_id": call_id,
-                },
-            )
-            manager.end_call(call_id)
-
-
-        # Clear busy status and remove from ConnectionManager
-        manager.clear_busy(user_id)
-        manager.disconnect(user_id, websocket)
+        if manager.is_current_connection(user_id, websocket):
+            call = manager.get_user_call(user_id)
+            if call is not None:
+                await _send_call_ended(call, user_id)
+                manager.end_call(call.call_id)
+            manager.disconnect(user_id, websocket)

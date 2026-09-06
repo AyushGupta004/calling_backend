@@ -1,215 +1,135 @@
 import asyncio
 import json
 import logging
-import time
+import uuid
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
 from fastapi import WebSocket
+
 
 logger = logging.getLogger("signaling.manager")
 
 
+@dataclass
+class Call:
+    call_id: str
+    caller_id: str
+    receiver_id: str
+    state: str = "ringing"
+
+
 class ConnectionManager:
-    """
-    In-memory registry managing active WebSocket connections and call busy-states.
-    Holds all real-time state in memory with no database writes for presence.
-    """
+    """In-memory WebSocket registry and one-to-one call state."""
 
     def __init__(self):
-        # user_id (str) -> WebSocket
         self.active_connections: Dict[str, WebSocket] = {}
-
-        # user_id (str) -> busy_call_id (str or None)
-        # Enforces: users cannot participate in multiple active calls simultaneously
-        self.busy_status: Dict[str, Optional[str]] = {}
-
-        # call_id (str) -> start_timestamp (float)
-        # Used by the background sweeper to clean up stale/wedged calls
-        self.call_start_times: Dict[str, float] = {}
-
-        # Concurrency lock to prevent race conditions during call setup
+        self.calls: Dict[str, Call] = {}
+        self.user_call_ids: Dict[str, str] = {}
         self.lock = asyncio.Lock()
 
-
     async def connect(self, user_id: str, websocket: WebSocket):
-        """
-        Accept and register an incoming WebSocket connection.
-        If the user previously had a connection, the new socket takes over.
-        """
         await websocket.accept()
         self.active_connections[user_id] = websocket
-        if user_id not in self.busy_status:
-            self.busy_status[user_id] = None
+        logger.info(
+            "[ConnectionManager] User '%s' connected (total online: %s)",
+            user_id,
+            len(self.active_connections),
+        )
 
-        logger.info(f"[ConnectionManager] User '{user_id}' connected (Total online: {len(self.active_connections)})")
+    def is_current_connection(self, user_id: str, websocket: WebSocket) -> bool:
+        return self.active_connections.get(user_id) is websocket
 
     def disconnect(self, user_id: str, websocket: Optional[WebSocket] = None):
-        """
-        Remove user from connection registry and clear any active call busy state.
-        Accepts optional websocket parameter for safe comparison.
-        """
-        # If a specific websocket was passed, only disconnect if it's the registered socket
-        if user_id in self.active_connections:
-            current_ws = self.active_connections[user_id]
-            if websocket is None or current_ws == websocket:
-                del self.active_connections[user_id]
-                logger.info(f"[ConnectionManager] User '{user_id}' disconnected")
-
-        # Clear busy call status when disconnecting
-        if user_id in self.busy_status:
-            del self.busy_status[user_id]
+        current = self.active_connections.get(user_id)
+        if current is None or (websocket is not None and current is not websocket):
+            return
+        del self.active_connections[user_id]
+        logger.info("[ConnectionManager] User '%s' disconnected", user_id)
 
     async def send_to(self, user_id: str, message: Dict[str, Any]) -> bool:
-        """
-        Send JSON payload to user if online.
-        Returns True if sent successfully, or False silently if not connected or send fails (do not raise).
-        """
         websocket = self.active_connections.get(user_id)
-        if not websocket:
+        if websocket is None:
             return False
 
         try:
-            payload = json.dumps(message)
-            await websocket.send_text(payload)
+            await websocket.send_text(json.dumps(message))
             return True
-        except Exception as e:
-            logger.warning(f"[ConnectionManager] Failed to send message to user '{user_id}': {e}")
-            # Clean up dead socket silently
+        except Exception as exc:
+            logger.warning("[ConnectionManager] Failed to send to '%s': %s", user_id, exc)
             self.disconnect(user_id, websocket)
             return False
 
-    # Alias for send_to for backwards/existing compatibility
-    async def send_personal_message(self, message: Dict[str, Any], user_id: str) -> bool:
-        return await self.send_to(user_id, message)
-
     def is_online(self, user_id: str) -> bool:
-        """Return True if user is currently connected, False otherwise."""
         return user_id in self.active_connections
 
     def get_online_users(self) -> List[str]:
-        """Return list of all currently connected user IDs."""
-        return list(self.active_connections.keys())
+        return list(self.active_connections)
 
-    # -------------------------------------------------------------
-    # Call Busy State Management
-    # -------------------------------------------------------------
+    def get_call(self, call_id: str) -> Optional[Call]:
+        return self.calls.get(call_id)
+
+    def get_user_call(self, user_id: str) -> Optional[Call]:
+        call_id = self.user_call_ids.get(user_id)
+        return self.calls.get(call_id) if call_id else None
 
     def is_busy(self, user_id: str) -> bool:
-        """Return True if user is currently in an active call."""
-        return self.busy_status.get(user_id) is not None
+        return user_id in self.user_call_ids
 
     def get_busy_call_id(self, user_id: str) -> Optional[str]:
-        """Return current call_id user is participating in, or None."""
-        return self.busy_status.get(user_id)
-
-    def set_busy(self, user_id: str, call_id: str) -> bool:
-        """
-        Mark user as busy with call_id.
-        Returns False if user is already busy in another call, True otherwise.
-        """
-        current = self.busy_status.get(user_id)
-        if current and current != call_id:
-            return False
-        self.busy_status[user_id] = call_id
-        return True
-
-    def clear_busy(self, user_id: str):
-        """Mark user as free/available."""
-        if user_id in self.busy_status:
-            self.busy_status[user_id] = None
-
-    def set_call_participants(self, caller_id: str, callee_id: str, call_id: str) -> bool:
-        """
-        Mark both participants busy for call_id if neither is busy.
-        Returns True if both successfully marked busy, False if either is already busy.
-        """
-        if self.is_busy(caller_id) or self.is_busy(callee_id):
-            return False
-
-        self.set_busy(caller_id, call_id)
-        self.set_busy(callee_id, call_id)
-        self.call_start_times[call_id] = time.time()
-        return True
-
-    async def try_initiate_call(
-        self, caller_id: str, callee_id: str, call_id: str
-    ) -> Tuple[bool, Optional[str]]:
-        """
-        Atomically verify that caller and callee are online and not busy under asyncio.Lock.
-        Prevents race condition where concurrent call_requests double-assign a user.
-        Returns:
-            (True, None) if call was successfully initiated and both users marked busy.
-            (False, "busy") if caller or callee is already busy.
-            (False, "offline") if callee is offline.
-        """
-        async with self.lock:
-            if self.is_busy(caller_id):
-                return False, "busy"
-            if not self.is_online(callee_id):
-                return False, "offline"
-            if self.is_busy(callee_id):
-                return False, "busy"
-
-            self.set_busy(caller_id, call_id)
-            self.set_busy(callee_id, call_id)
-            self.call_start_times[call_id] = time.time()
-            return True, None
-
+        return self.user_call_ids.get(user_id)
 
     def get_call_partner(self, user_id: str) -> Optional[str]:
-        """Find the user ID of the other participant in the user's active call, or None."""
-        call_id = self.get_busy_call_id(user_id)
-        if not call_id:
+        call = self.get_user_call(user_id)
+        if call is None:
             return None
-        for uid, cid in self.busy_status.items():
-            if uid != user_id and cid == call_id:
-                return uid
-        return None
+        return call.receiver_id if call.caller_id == user_id else call.caller_id
 
-    def end_call(self, call_id: str):
-        """Clear busy state for all participants associated with call_id."""
-        for uid, cid in list(self.busy_status.items()):
-            if cid == call_id:
-                self.busy_status[uid] = None
-        self.call_start_times.pop(call_id, None)
+    async def create_call(self, caller_id: str, receiver_id: str) -> Tuple[Optional[Call], Optional[str]]:
+        async with self.lock:
+            if not self.is_online(receiver_id):
+                return None, "offline"
+            if self.is_busy(caller_id) or self.is_busy(receiver_id):
+                return None, "busy"
 
-    def clear_stale_calls(self, max_duration: float = 2 * 60 * 60, now: Optional[float] = None) -> List[str]:
-        """Clear calls that have exceeded the maximum allowed duration."""
-        current_time = time.time() if now is None else now
-        stale_call_ids = [
-            call_id
-            for call_id, start_time in list(self.call_start_times.items())
-            if current_time - start_time > max_duration
-        ]
-
-        for call_id in stale_call_ids:
-            elapsed = current_time - self.call_start_times[call_id]
-            logger.warning(
-                f"[ConnectionManager] Clearing stale call '{call_id}' after {elapsed:.0f} seconds"
+            call = Call(
+                call_id=str(uuid.uuid4()),
+                caller_id=caller_id,
+                receiver_id=receiver_id,
             )
-            self.end_call(call_id)
+            self.calls[call.call_id] = call
+            self.user_call_ids[caller_id] = call.call_id
+            self.user_call_ids[receiver_id] = call.call_id
+            return call, None
 
-        return stale_call_ids
+    def is_participant(self, call_id: str, user_id: str) -> bool:
+        call = self.get_call(call_id)
+        return bool(call and user_id in (call.caller_id, call.receiver_id))
 
-    async def sweep_stale_calls(self, interval: float = 30, max_duration: float = 2 * 60 * 60):
-        """Periodically clear calls wedged by a crashed or disconnected client."""
-        try:
-            while True:
-                await asyncio.sleep(interval)
-                self.clear_stale_calls(max_duration=max_duration)
-        except asyncio.CancelledError:
-            logger.info("[ConnectionManager] Stale-call sweep stopped")
-            raise
+    def set_state(self, call_id: str, state: str) -> bool:
+        call = self.get_call(call_id)
+        if call is None:
+            return False
+        call.state = state
+        return True
+
+    def end_call(self, call_id: str) -> Optional[Call]:
+        call = self.calls.pop(call_id, None)
+        if call is None:
+            return None
+        for user_id in (call.caller_id, call.receiver_id):
+            if self.user_call_ids.get(user_id) == call_id:
+                del self.user_call_ids[user_id]
+        return call
 
     async def broadcast(self, message: Dict[str, Any], exclude_user: Optional[str] = None):
-        """Broadcast a JSON message to all online users except optional exclude_user."""
-        for uid, ws in list(self.active_connections.items()):
-            if uid == exclude_user:
+        for user_id, websocket in list(self.active_connections.items()):
+            if user_id == exclude_user:
                 continue
             try:
-                await ws.send_text(json.dumps(message))
+                await websocket.send_text(json.dumps(message))
             except Exception:
-                self.disconnect(uid, ws)
+                self.disconnect(user_id, websocket)
 
 
-# Singleton instance shared across the application
 manager = ConnectionManager()

@@ -1,224 +1,58 @@
-# Calling App Signaling Backend
+# Calling Backend
 
-FastAPI signaling backend for 1-to-1 WebRTC calling applications with PostgreSQL persistence and in-memory WebSocket routing, ready for deployment on [Render](https://render.com).
+Small FastAPI signaling backend for a one-to-one Flutter audio calling demo.
 
----
+## Scope
 
-## Project Structure
+The backend provides:
 
-```
-calling_backend/
-├── app/
-│   ├── __init__.py
-│   ├── main.py                  # FastAPI app setup, CORS, lifespan DB initialization, router mounts
-│   ├── database.py              # SQLAlchemy engine/session, auto-fixes Render postgres://, get_db()
-│   ├── models.py                # User & Contact SQLAlchemy models with constraints
-│   ├── schemas.py               # Pydantic v2 schemas for requests, responses, TURN & signaling
-│   ├── connection_manager.py    # In-memory WebSocket connection registry & presence tracking
-│   ├── ws.py                    # Real-time WebSocket endpoint (/ws/{user_id}) & call routing
-│   └── routers/
-│       ├── __init__.py
-│       ├── users.py             # User registration, search, and online status
-│       ├── contacts.py          # Contact list management (add, list, delete)
-│       └── turn.py              # Short-lived TURN REST API credentials (Coturn HMAC-SHA1)
-├── .env.example                 # Environment variables template
-├── main.py                      # Root entrypoint re-exporting app for uvicorn
-├── render.yaml                  # Infrastructure-as-Code blueprint for Render (Web + PostgreSQL)
-└── requirements.txt             # Project dependencies
+- User registration, lookup, search, and contacts.
+- WebSocket connections at `/ws/{user_id}`.
+- One in-memory active call per user.
+- Backend-generated call IDs.
+- Forwarding for offer, answer, and ICE candidate messages.
+
+Audio is never sent through the backend. The Flutter devices create their own direct WebRTC candidates and exchange them through the WebSocket. No ICE server is configured.
+
+## Run locally
+
+```powershell
+.\venv\Scripts\Activate.ps1
+uvicorn app.main:app --reload
 ```
 
----
+The default database is local SQLite. Set `DATABASE_URL` for PostgreSQL or another SQLAlchemy-supported database.
 
-## Database Models
+## WebSocket protocol
 
-- **User (`users` table)**:
-  - `id`: UUID string primary key.
-  - `name`: User's display name.
-  - `username`: Unique, indexed string handle.
-  - `created_at`: UTC timestamp.
-- **Contact (`contacts` table)**:
-  - `id`: Auto-incrementing integer primary key.
-  - `user_id`: Foreign key referencing `users.id` (on delete cascade).
-  - `contact_id`: Foreign key referencing `users.id` (on delete cascade).
-  - `created_at`: UTC timestamp.
-  - **Unique constraint**: `(user_id, contact_id)` prevents duplicate contact entries.
+Connect both users to `ws://<host>/ws/<user_id>`.
 
----
-
-## Local Development
-
-1. **Activate Virtual Environment**:
-   ```bash
-   # Windows
-   venv\Scripts\activate
-   # Linux / macOS
-   source venv/bin/activate
-   ```
-
-2. **Install Dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Run Server**:
-   ```bash
-   uvicorn main:app --reload
-   ```
-   *Note: If `DATABASE_URL` is not set in environment or `.env`, it automatically falls back to local SQLite (`calling_app.db`).*
-
-4. **Interactive API Documentation**:
-   - Swagger UI: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-   - ReDoc: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
-
----
-
-## Deploying to Render
-
-### Method 1: Blueprint Deployment (Recommended)
-1. Push this repository to GitHub/GitLab.
-2. In the [Render Dashboard](https://dashboard.render.com/), click **New** -> **Blueprint**.
-3. Select your repository. Render will automatically parse [render.yaml](file:///d:/calling_backend/render.yaml) and provision:
-   - A managed **PostgreSQL Database** (`calling-db`).
-   - A **FastAPI Web Service** (`calling-backend`) with `DATABASE_URL` automatically injected.
-4. Click **Apply**.
-
-### Method 2: Manual Deployment
-1. **Create PostgreSQL Database on Render**:
-   - Go to **New** -> **PostgreSQL**.
-   - Copy the **Internal Database URL** (e.g. `postgres://user:password@dpg-.../dbname`).
-2. **Create Web Service**:
-   - Go to **New** -> **Web Service** and link your repo.
-   - **Runtime**: `Python`
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-   - Under **Environment Variables**, add:
-     - `DATABASE_URL`: *(paste the Internal Database URL from step 1)*
-   - `database.py` automatically handles converting `postgres://` to `postgresql://` required by SQLAlchemy 2.0.
-
----
-
-## TURN / ICE Credentials (`GET /turn-credentials`)
-
-When peers are behind symmetric NATs or carrier-grade NATs (CGNAT) common on mobile data networks, direct P2P connections and public STUN servers fail (WebRTC ICE gets stuck at `checking` → `disconnected`). This endpoint issues dynamic, short-lived Coturn REST API (RFC 5766 / draft-uberti-behave-turn-rest-00) credentials so clients never hardcode credentials.
-
-### Authentication
-Requests must be authenticated by a known, registered `user_id`, passed either as:
-- **Query Parameter**: `GET /turn-credentials?user_id=<user_id>` (optional `&ttl=3600`)
-- **Header**: `GET /turn-credentials` with `X-User-Id: <user_id>`
-
-Unauthenticated requests return `HTTP 401 Unauthorized`. Non-existent user IDs return `HTTP 404 Not Found`.
-
-### Credential Generation Mechanism
-- **Username**: `{timestamp_seconds}:{user_id}` (where `timestamp_seconds = int(time.time()) + ttl`)
-- **Credential**: `base64(HMAC-SHA1(static_auth_secret, username))`
-
-Because the username encodes the expiration epoch, credentials dynamically change across calls and are automatically validated by Coturn's static-auth-secret mechanism without database lookups.
-
-### Response Payload
-```json
-{
-  "iceServers": [
-    {
-      "urls": "stun:stun.l.google.com:19302"
-    },
-    {
-      "urls": [
-        "turn:turn.example.com:3478?transport=udp",
-        "turn:turn.example.com:3478?transport=tcp",
-        "turns:turn.example.com:5349?transport=tcp"
-      ],
-      "username": "1788693290:2f94edeb-6563-4819-8654-5daf97563c79",
-      "credential": "sBHA06avwyHEQddZIj+oKCeaxtw="
-    }
-  ],
-  "ttl": 3600
-}
-```
-
----
-
-## Environment Variables
-
-| Variable | Description | Default |
-|---|---|---|
-| `DATABASE_URL` | PostgreSQL or SQLite connection string | `sqlite:///./calling_app.db` |
-| `TURN_HOST` | Hostname or IP of the Coturn server | `turn.example.com` |
-| `TURN_STATIC_AUTH_SECRET` | Shared secret configured in Coturn (`static-auth-secret`) | `calling-backend-turn-secret-key` |
-| `TURN_TTL` | Credential validity duration in seconds | `3600` |
-| `STUN_URL` | Public STUN server URL | `stun:stun.l.google.com:19302` |
-
----
-
-## WebSocket Signaling Protocol (`/ws/{user_id}`)
-
-Connect to:
-`ws://<host>/ws/{user_id}` (or `wss://<host>/ws/{user_id}` in production).
-
-On connection, the user is registered in the in-memory `ConnectionManager`.
-
-### 1. Initiate Call (`call_request`)
 Caller sends:
+
 ```json
-{
-  "type": "call_request",
-  "to_user_id": "<callee_user_id>"
-}
+{"type":"call_request","to_user_id":"receiver_id"}
 ```
-- If callee is offline: caller receives `{"type": "call_failed", "reason": "offline"}`.
-- If callee or caller is already in an active call: caller receives `{"type": "call_failed", "reason": "busy"}`.
-- If callee is available: server generates a `call_id` (`uuid4`), marks both users as busy, and sends to the callee:
-  ```json
-  {
-    "type": "incoming_call",
-    "from_user_id": "<caller_user_id>",
-    "call_id": "<call_id>"
-  }
-  ```
 
-### 2. Callee Responds
-- **Accept**: Callee sends:
-  ```json
-  {
-    "type": "call_accepted",
-    "call_id": "<call_id>",
-    "to_user_id": "<caller_user_id>"
-  }
-  ```
-  Caller receives `{"type": "call_accepted", "call_id": "<call_id>"}`.
+The backend creates one `call_id`, stores the caller/receiver pair in memory, and sends:
 
-- **Reject**: Callee sends:
-  ```json
-  {
-    "type": "call_rejected",
-    "call_id": "<call_id>",
-    "to_user_id": "<caller_user_id>"
-  }
-  ```
-  Caller receives `{"type": "call_rejected", "call_id": "<call_id>"}` and busy state is cleared for both users.
-
-### 3. WebRTC SDP & ICE Candidate Exchange
-Senders must be actively engaged in `call_id`:
-- **Offer**: `{"type": "offer", "call_id": "<call_id>", "to_user_id": "<peer_id>", "sdp": {...}}`
-- **Answer**: `{"type": "answer", "call_id": "<call_id>", "to_user_id": "<peer_id>", "sdp": {...}}`
-- **ICE Candidate**: `{"type": "ice_candidate", "call_id": "<call_id>", "to_user_id": "<peer_id>", "candidate": {...}}`
-
-### 4. Terminate Call (`call_ended`)
-Either party sends:
 ```json
-{
-  "type": "call_ended",
-  "call_id": "<call_id>",
-  "to_user_id": "<peer_id>"
-}
+{"type":"incoming_call","call_id":"...","from_user_id":"caller_id"}
+{"type":"call_started","call_id":"...","to_user_id":"receiver_id"}
 ```
-Peer receives `{"type": "call_ended", "call_id": "<call_id>"}` and busy status is cleared.
 
-### 5. Abrupt Disconnection
-If a user disconnects during an active call, their partner receives:
+The receiver accepts or rejects with:
+
 ```json
-{
-  "type": "call_ended",
-  "reason": "peer_disconnected",
-  "call_id": "<call_id>"
-}
+{"type":"call_accepted","call_id":"..."}
+{"type":"call_rejected","call_id":"..."}
 ```
+
+After acceptance, either participant sends `offer`, `answer`, or `ice_candidate` with the same `call_id` and its payload. The backend verifies membership and forwards the complete message only to the other participant. It does not trust or require a client destination field.
+
+Either participant ends the call with:
+
+```json
+{"type":"call_ended","call_id":"..."}
+```
+
+The other participant receives the same message. Disconnecting either current WebSocket also ends the active call for both users. A stale socket cannot clear a replacement connection's state.

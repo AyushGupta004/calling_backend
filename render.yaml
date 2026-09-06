@@ -1,5 +1,4 @@
 services:
-  # FastAPI Web Service
   - type: web
     name: calling-backend
     runtime: python
@@ -13,19 +12,10 @@ services:
           property: connectionString
       - key: PYTHON_VERSION
         value: 3.11.9
-      # Configure TURN_HOST with your actual Coturn domain or public IP in the Render Dashboard.
-      # Setting sync: false ensures Render retains the real dashboard value and future deploys won't regress.
-      - key: TURN_HOST
-        sync: false
-      # Secret key matching static-auth-secret in coturn's turnserver.conf
-      - key: TURN_STATIC_AUTH_SECRET
-        generateValue: true
 
-
-# Managed PostgreSQL Database on Render
 databases:
   - name: calling-db
     databaseName: calling_db
     user: calling_user
     plan: free
-    ipAllowList: [] # Only internal services can connect
+    ipAllowList: []
