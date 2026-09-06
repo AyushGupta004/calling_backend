@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import uvicorn
@@ -8,8 +9,11 @@ import app.models  # Ensure models are registered on Base.metadata
 from app.database import Base, engine
 from app.routers import contacts, turn, users
 from app.ws import router as ws_router
+from app.connection_manager import manager
 
 logger = logging.getLogger("calling.main")
+
+stale_call_sweep_task = None
 
 app = FastAPI(title="Calling App Signaling Backend")
 
@@ -24,7 +28,7 @@ app.add_middleware(
 
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     """Create all database tables on application startup and verify TURN configuration."""
     Base.metadata.create_all(bind=engine)
 
@@ -38,6 +42,18 @@ def on_startup():
         )
     else:
         logger.info("TURN server relay configured at: %s", turn_host)
+
+    global stale_call_sweep_task
+    stale_call_sweep_task = asyncio.create_task(manager.sweep_stale_calls())
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    global stale_call_sweep_task
+    if stale_call_sweep_task:
+        stale_call_sweep_task.cancel()
+        await asyncio.gather(stale_call_sweep_task, return_exceptions=True)
+        stale_call_sweep_task = None
 
 
 # Include REST API and WebSocket Routers

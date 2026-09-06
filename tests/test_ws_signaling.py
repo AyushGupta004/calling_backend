@@ -174,6 +174,20 @@ async def run_signaling_tests():
         assert disc_msg.get("call_id") == cid
         print("[PASS] Bob received {call_ended, reason: peer_disconnected} upon Alice disconnect")
 
+        # Reconnecting Alice and starting a new call verifies both busy states were cleared.
+        async with websockets.connect(f"{WS_URL}/ws/{uid_a}") as ws_a_again:
+            await ws_a_again.send(json.dumps({"type": "call_request", "to_user_id": uid_b}))
+            fresh_call = json.loads(await asyncio.wait_for(ws_b.recv(), timeout=2.0))
+            assert fresh_call["type"] == "incoming_call"
+            fresh_call_id = fresh_call["call_id"]
+            await ws_a_again.send(json.dumps({
+                "type": "call_ended",
+                "call_id": fresh_call_id,
+                "to_user_id": uid_b,
+            }))
+            await asyncio.wait_for(ws_b.recv(), timeout=2.0)
+        print("[PASS] Both busy states cleared after abrupt disconnect; a fresh call succeeded")
+
     print("\n=======================================================")
     print("ALL WS.PY SIGNALING REQUIREMENTS VERIFIED AND PASSED!")
     print("=======================================================")

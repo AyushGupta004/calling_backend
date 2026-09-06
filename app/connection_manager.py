@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import WebSocket
 
@@ -20,6 +21,10 @@ class ConnectionManager:
         # user_id (str) -> busy_call_id (str or None)
         # Enforces: users cannot participate in multiple active calls simultaneously
         self.busy_status: Dict[str, Optional[str]] = {}
+
+        # call_id (str) -> start_timestamp (float)
+        # Used by the background sweeper to clean up stale/wedged calls
+        self.call_start_times: Dict[str, float] = {}
 
         # Concurrency lock to prevent race conditions during call setup
         self.lock = asyncio.Lock()
@@ -122,6 +127,7 @@ class ConnectionManager:
 
         self.set_busy(caller_id, call_id)
         self.set_busy(callee_id, call_id)
+        self.call_start_times[call_id] = time.time()
         return True
 
     async def try_initiate_call(
@@ -145,6 +151,7 @@ class ConnectionManager:
 
             self.set_busy(caller_id, call_id)
             self.set_busy(callee_id, call_id)
+            self.call_start_times[call_id] = time.time()
             return True, None
 
 
@@ -163,6 +170,35 @@ class ConnectionManager:
         for uid, cid in list(self.busy_status.items()):
             if cid == call_id:
                 self.busy_status[uid] = None
+        self.call_start_times.pop(call_id, None)
+
+    def clear_stale_calls(self, max_duration: float = 2 * 60 * 60, now: Optional[float] = None) -> List[str]:
+        """Clear calls that have exceeded the maximum allowed duration."""
+        current_time = time.time() if now is None else now
+        stale_call_ids = [
+            call_id
+            for call_id, start_time in list(self.call_start_times.items())
+            if current_time - start_time > max_duration
+        ]
+
+        for call_id in stale_call_ids:
+            elapsed = current_time - self.call_start_times[call_id]
+            logger.warning(
+                f"[ConnectionManager] Clearing stale call '{call_id}' after {elapsed:.0f} seconds"
+            )
+            self.end_call(call_id)
+
+        return stale_call_ids
+
+    async def sweep_stale_calls(self, interval: float = 30, max_duration: float = 2 * 60 * 60):
+        """Periodically clear calls wedged by a crashed or disconnected client."""
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                self.clear_stale_calls(max_duration=max_duration)
+        except asyncio.CancelledError:
+            logger.info("[ConnectionManager] Stale-call sweep stopped")
+            raise
 
     async def broadcast(self, message: Dict[str, Any], exclude_user: Optional[str] = None):
         """Broadcast a JSON message to all online users except optional exclude_user."""

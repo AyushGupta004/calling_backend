@@ -65,6 +65,8 @@ async def websocket_signaling_endpoint(
                 if not to_user_id:
                     continue
 
+                logger.info(f"[Signaling] {user_id} -> {to_user_id} | type='call_request'")
+
                 call_id = str(uuid.uuid4())
 
                 # Atomically check online/busy status and register call_id under asyncio.Lock

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import time
 import unittest
 from unittest.mock import AsyncMock
 
@@ -125,6 +126,43 @@ class TestConnectionManager(unittest.IsolatedAsyncioTestCase):
         # Bob must be assigned to the winning call, never double-assigned
         winning_call = self.cm.get_busy_call_id("bob")
         self.assertIn(winning_call, ["call_a_b", "call_c_b"])
+
+
+    async def test_call_start_times_tracking(self):
+        # 1. Test set_call_participants records call_start_times
+        call_id = "test_call_start_time_01"
+        self.cm.set_call_participants("u1", "u2", call_id)
+        self.assertIn(call_id, self.cm.call_start_times)
+        self.assertIsInstance(self.cm.call_start_times[call_id], float)
+
+        # 2. Test end_call removes call_start_times
+        self.cm.end_call(call_id)
+        self.assertNotIn(call_id, self.cm.call_start_times)
+
+        # 3. Test try_initiate_call records call_start_times
+        mock1 = AsyncMock()
+        mock2 = AsyncMock()
+        await self.cm.connect("u3", mock1)
+        await self.cm.connect("u4", mock2)
+        call_id_2 = "test_call_start_time_02"
+        success, _ = await self.cm.try_initiate_call("u3", "u4", call_id_2)
+        self.assertTrue(success)
+        self.assertIn(call_id_2, self.cm.call_start_times)
+
+        self.cm.end_call(call_id_2)
+        self.assertNotIn(call_id_2, self.cm.call_start_times)
+
+    async def test_clear_stale_calls_clears_busy_state(self):
+        call_id = "stale_call"
+        self.cm.set_call_participants("u1", "u2", call_id)
+        self.cm.call_start_times[call_id] = time.time() - (2 * 60 * 60 + 1)
+
+        cleared = self.cm.clear_stale_calls()
+
+        self.assertEqual(cleared, [call_id])
+        self.assertFalse(self.cm.is_busy("u1"))
+        self.assertFalse(self.cm.is_busy("u2"))
+        self.assertNotIn(call_id, self.cm.call_start_times)
 
 
 if __name__ == "__main__":
