@@ -14,7 +14,7 @@ import logging
 import os
 from typing import Dict, List
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("signaling")
@@ -32,6 +32,16 @@ VALID_MESSAGE_TYPES = {"offer", "answer", "ice-candidate"}
 async def health_check():
     """Simple health check so Render's health probe (and you) can verify it's alive."""
     return {"status": "ok", "active_rooms": len(rooms)}
+
+@app.head("/health")
+async def health_check_head():
+    """
+    Lightweight HEAD health check.
+
+    Returns only HTTP 200 without a response body.
+    Ideal for uptime monitoring services.
+    """
+    return Response(status_code=200)
 
 
 @app.websocket("/ws/{room_id}")
