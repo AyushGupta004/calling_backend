@@ -25,6 +25,7 @@ def on_startup():
 
 
 app.include_router(users.router)
+app.include_router(users.login_router)
 app.include_router(contacts.router)
 app.include_router(voice_detection.router)
 app.include_router(ws_router)

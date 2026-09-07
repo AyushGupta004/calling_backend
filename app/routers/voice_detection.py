@@ -11,6 +11,7 @@ from gradio_client import Client, handle_file
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.connection_manager import manager
 from app.models import FlaggedNumber
 from app.schemas import FlaggedNumberResponse
 
@@ -86,7 +87,7 @@ def _parse_result(value: Any, depth: int = 0) -> Optional[Dict[str, Any]]:
 
 
 @router.post("/voice-detection")
-def detect_voice(
+async def detect_voice(
     file: Optional[UploadFile] = File(None),
     phone_number: Optional[str] = Form(None),
     db: Session = Depends(get_db),
@@ -171,21 +172,36 @@ def detect_voice(
             clean_phone_number = phone_number.strip()
             if re.fullmatch(r"\+?[0-9]{7,15}", clean_phone_number):
                 try:
-                    db.add(
-                        FlaggedNumber(
-                            phone_number=clean_phone_number,
-                            verdict=parsed_result["verdict"],
-                            fake_probability=parsed_result["fake_probability"],
-                            bonafide_score=parsed_result["bonafide_score"],
-                            source="voice_detection",
-                        )
+                    flagged_number = FlaggedNumber(
+                        phone_number=clean_phone_number,
+                        verdict=parsed_result["verdict"],
+                        fake_probability=parsed_result["fake_probability"],
+                        bonafide_score=parsed_result["bonafide_score"],
+                        source="voice_detection",
                     )
+                    db.add(flagged_number)
                     db.commit()
                     logger.info(
                         "Persisted flagged number: phone_number=%r verdict=%s",
                         clean_phone_number,
                         parsed_result["verdict"],
                     )
+                    try:
+                        await manager.broadcast(
+                            {
+                                "type": "scam_number_flagged",
+                                "phone_number": clean_phone_number,
+                                "verdict": parsed_result["verdict"],
+                                "fake_probability": parsed_result["fake_probability"],
+                                "bonafide_score": parsed_result["bonafide_score"],
+                                "flagged_at": flagged_number.flagged_at.isoformat(),
+                            }
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to broadcast flagged number: phone_number=%r",
+                            clean_phone_number,
+                        )
                 except Exception:
                     db.rollback()
                     logger.exception(

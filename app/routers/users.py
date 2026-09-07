@@ -8,6 +8,7 @@ from app.models import User
 from app.schemas import UserCreate, UserResponse, UserSearchResult
 
 router = APIRouter(prefix="/users", tags=["Users"])
+login_router = APIRouter(tags=["Users"])
 
 
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -50,6 +51,21 @@ def get_user_by_phone(phone_number: str, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"User with phone number '{clean_phone_number}' not found",
+        )
+
+    response_data = UserResponse.model_validate(user)
+    response_data.is_online = manager.is_online(user.id)
+    return response_data
+
+
+@login_router.post("/login", response_model=UserResponse)
+def login_user(user_in: dict, db: Session = Depends(get_db)):
+    phone_number = user_in.get("phone_number", "").strip()
+    user = db.query(User).filter(User.phone_number == phone_number).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with phone number '{phone_number}' not found",
         )
 
     response_data = UserResponse.model_validate(user)
