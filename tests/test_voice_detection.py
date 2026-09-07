@@ -68,7 +68,25 @@ def test_voice_detection_returns_failure_for_unexpected_gradio_result():
     assert response.status_code == 200
     assert response.json() == {
         "success": False,
-        "message": "Voice detection failed",
+        "message": "Unexpected Gradio response",
+        "result_type": "dict",
+        "result": "{'success': True}",
+    }
+
+
+def test_voice_detection_returns_gradio_exception_details():
+    with patch("app.routers.voice_detection.Client") as client_class:
+        client_class.return_value.predict.side_effect = RuntimeError("Space unavailable")
+        response = client.post(
+            "/voice-detection",
+            files={"file": ("caller.mp3", b"mp3 bytes", "audio/mpeg")},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "success": False,
+        "message": "Gradio prediction failed",
+        "error": "Space unavailable",
     }
 
 
@@ -88,7 +106,9 @@ def test_voice_detection_returns_failure_for_invalid_scores():
     assert response.status_code == 200
     assert response.json() == {
         "success": False,
-        "message": "Voice detection failed",
+        "message": "Unexpected Gradio response",
+        "result_type": "dict",
+        "result": "{'success': True, 'fake_probability': '0.1', 'bonafide_score': 0.9, 'verdict': 'REAL'}",
     }
 
 

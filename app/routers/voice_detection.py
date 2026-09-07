@@ -17,6 +17,15 @@ def _failure_response() -> Dict[str, Any]:
     return {"success": False, "message": "Voice detection failed"}
 
 
+def _unexpected_response(result: Any) -> Dict[str, Any]:
+    return {
+        "success": False,
+        "message": "Unexpected Gradio response",
+        "result_type": type(result).__name__,
+        "result": repr(result),
+    }
+
+
 def _validate_result(result: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(result, dict) or result.get("success") is not True:
         return None
@@ -73,37 +82,83 @@ def _parse_result(value: Any, depth: int = 0) -> Optional[Dict[str, Any]]:
 
 @router.post("/voice-detection")
 def detect_voice(file: Optional[UploadFile] = File(None)) -> Dict[str, Any]:
-    if file is None or not file.filename or not file.filename.lower().endswith(".mp3"):
+    if file is None:
         return _failure_response()
 
+    uploaded_filename = file.filename
     temporary_path = None
+    result = None
     try:
         audio_bytes = file.file.read()
         logger.info(
             "Voice detection upload: filename=%r content_type=%r size=%d",
-            file.filename,
+            uploaded_filename,
             file.content_type,
             len(audio_bytes),
         )
-        if not audio_bytes:
+        if (
+            not uploaded_filename
+            or not uploaded_filename.lower().endswith(".mp3")
+            or not audio_bytes
+        ):
             return _failure_response()
 
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temporary_file:
             temporary_file.write(audio_bytes)
             temporary_path = temporary_file.name
-        logger.info("Voice detection temporary file: path=%r", temporary_path)
-
-        client = Client("Juek/AI_Voice_Detection")
-        result = client.predict(
-            audio_path=handle_file(temporary_path),
-            api_name="/detect_voice",
+        temporary_size = os.path.getsize(temporary_path)
+        logger.info(
+            "Voice detection temporary file: path=%r exists=%s size=%d",
+            temporary_path,
+            os.path.exists(temporary_path),
+            temporary_size,
         )
+        if temporary_size == 0:
+            return _failure_response()
+
+        try:
+            logger.info("Initializing Gradio Client for Juek/AI_Voice_Detection")
+            client = Client("Juek/AI_Voice_Detection")
+            if hasattr(client, "view_api"):
+                try:
+                    api_info = client.view_api(return_format="dict")
+                    logger.info("Gradio API information: %r", api_info)
+                except Exception:
+                    logger.exception("Unable to retrieve Gradio API information")
+
+            result = client.predict(
+                audio_path=handle_file(temporary_path),
+                api_name="/detect_voice",
+            )
+        except Exception as exc:
+            logger.exception(
+                "Gradio prediction failed: filename=%r uploaded_size=%d "
+                "temporary_path=%r temporary_size=%s result_type=%s result=%r "
+                "exception_type=%s exception_message=%s",
+                uploaded_filename,
+                len(audio_bytes),
+                temporary_path,
+                temporary_size,
+                type(result).__name__,
+                result,
+                type(exc).__name__,
+                str(exc),
+            )
+            return {
+                "success": False,
+                "message": "Gradio prediction failed",
+                "error": str(exc),
+            }
+
+        print("GRADIO RESULT TYPE:", type(result))
+        print("GRADIO RESULT:", repr(result))
         logger.info(
             "Voice detection Gradio result: type=%s repr=%r",
             type(result).__name__,
             result,
         )
-        return _parse_result(result) or _failure_response()
+        parsed_result = _parse_result(result)
+        return parsed_result or _unexpected_response(result)
     except Exception:
         logger.exception("Voice detection failed while calling Gradio")
         return _failure_response()
