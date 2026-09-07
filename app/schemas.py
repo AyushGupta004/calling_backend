@@ -6,7 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class UserBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
-    username: str = Field(..., min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_.-]+$")
+    phone_number: str = Field(..., min_length=7, max_length=16, pattern=r"^\+?[0-9]{7,15}$")
+    username: Optional[str] = Field(None, min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_.-]+$")
 
 
 class UserCreate(UserBase):
@@ -24,7 +25,8 @@ class UserResponse(UserBase):
 class UserSearchResult(BaseModel):
     id: str
     name: str
-    username: str
+    phone_number: str
+    username: Optional[str] = None
     is_online: Optional[bool] = None
 
     model_config = ConfigDict(from_attributes=True)
@@ -40,7 +42,8 @@ class ContactResponse(BaseModel):
     user_id: str
     contact_id: str
     name: str
-    username: str
+    phone_number: str
+    username: Optional[str] = None
     created_at: datetime
     is_online: Optional[bool] = None
     contact: Optional[UserSearchResult] = None
@@ -55,3 +58,13 @@ class SignalingMessage(BaseModel):
     sdp: Optional[Any] = None
     candidate: Optional[Any] = None
     reason: Optional[str] = None
+
+
+class FlaggedNumberResponse(BaseModel):
+    phone_number: str
+    verdict: str
+    fake_probability: float
+    bonafide_score: float
+    flagged_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

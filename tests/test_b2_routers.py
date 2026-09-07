@@ -35,29 +35,33 @@ def run_tests():
     print("--- 1. Initializing DB ---")
     init_db()
 
-    # Generate unique test usernames to avoid previous run collisions
-    suffix = str(uuid.uuid4())[:8]
-    user1_username = f"dave_{suffix}"
-    user2_username = f"emma_{suffix}"
+    # Generate unique phone numbers to avoid previous run collisions
+    suffix = str(uuid.uuid4().int % 100000000).zfill(8)
+    user1_phone = f"+1555{suffix[:8]}"
+    user2_phone = f"+1666{suffix[:8]}"
 
     print("\n--- 2. Testing POST /users ---")
     # Valid creation
-    status, user1 = make_request("/users", "POST", {"name": "Dave Developer", "username": user1_username})
+    status, user1 = make_request("/users", "POST", {"name": "Dave Developer", "phone_number": user1_phone})
     assert status == 201, f"Expected 201, got {status}: {user1}"
-    assert "id" in user1 and user1["username"] == user1_username
+    assert "id" in user1 and user1["phone_number"] == user1_phone
     user1_id = user1["id"]
     print(f"[PASS] Created User 1: {user1['name']} ({user1_id})")
 
-    status, user2 = make_request("/users", "POST", {"name": "Emma Engineer", "username": user2_username})
+    status, user2 = make_request("/users", "POST", {"name": "Emma Engineer", "phone_number": user2_phone})
     assert status == 201, f"Expected 201, got {status}: {user2}"
-    assert "id" in user2 and user2["username"] == user2_username
+    assert "id" in user2 and user2["phone_number"] == user2_phone
     user2_id = user2["id"]
     print(f"[PASS] Created User 2: {user2['name']} ({user2_id})")
 
-    # Reject duplicate username with 409
-    status, dup_resp = make_request("/users", "POST", {"name": "Dave Duplicate", "username": user1_username})
+    # Reject duplicate phone number with 409
+    status, dup_resp = make_request("/users", "POST", {"name": "Dave Duplicate", "phone_number": user1_phone})
     assert status == 409, f"Expected 409 Conflict, got {status}: {dup_resp}"
-    print(f"[PASS] Duplicate username correctly rejected with HTTP 409: {dup_resp}")
+    print(f"[PASS] Duplicate phone number correctly rejected with HTTP 409: {dup_resp}")
+
+    status, user_by_phone = make_request(f"/users/by-phone/{user1_phone}")
+    assert status == 200 and user_by_phone["id"] == user1_id
+    print("[PASS] Phone-number login lookup returned the existing user")
 
     print("\n--- 3. Testing GET /users/search?q=<term> ---")
     # Partial match on name
@@ -67,12 +71,12 @@ def run_tests():
     assert found_dave, f"User 1 not found in search results: {results}"
     print("[PASS] Case-insensitive search by name prefix 'dev' succeeded")
 
-    # Partial match on username (case-insensitive)
-    status, results = make_request(f"/users/search?q={user2_username.upper()[:4]}")
+    # Partial match on phone number
+    status, results = make_request(f"/users/search?q={user2_phone[4:10]}")
     assert status == 200, f"Expected 200, got {status}: {results}"
     found_emma = any(u["id"] == user2_id for u in results)
     assert found_emma, f"User 2 not found in search results: {results}"
-    print("[PASS] Case-insensitive uppercase search succeeded")
+    print("[PASS] Partial phone-number search succeeded")
 
     # Exclude requesting user
     status, results_excluded = make_request(f"/users/search?q=e&user_id={user1_id}")
@@ -113,7 +117,7 @@ def run_tests():
     assert created_contact["user_id"] == user1_id
     assert created_contact["contact_id"] == user2_id
     assert created_contact["name"] == "Emma Engineer"
-    assert created_contact["username"] == user2_username
+    assert created_contact["phone_number"] == user2_phone
     contact_record_id = created_contact["id"]
     print(f"[PASS] Contact created (Contact Table ID={contact_record_id}) joined with name='{created_contact['name']}'")
 
@@ -129,8 +133,8 @@ def run_tests():
     matched = next((c for c in contacts_list if c["id"] == contact_record_id), None)
     assert matched is not None
     assert matched["name"] == "Emma Engineer"
-    assert matched["username"] == user2_username
-    print(f"[PASS] GET /contacts/{user1_id} returns contact joined with name/username: {matched['name']} (@{matched['username']})")
+    assert matched["phone_number"] == user2_phone
+    print(f"[PASS] GET /contacts/{user1_id} returns contact joined with name/phone: {matched['name']} ({matched['phone_number']})")
 
     # Non-existent user_id returns 404
     status, contacts_404 = make_request(f"/contacts/{uuid.uuid4()}")

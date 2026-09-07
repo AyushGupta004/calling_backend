@@ -19,7 +19,7 @@ def add_contact(payload: ContactCreate, db: Session = Depends(get_db)):
     - Validates both users exist (404 if either not found).
     - Rejects self-addition (400).
     - Rejects duplicates (409).
-    - Returns created contact joined with contact's name and username.
+    - Returns created contact joined with the contact's name and phone number.
     """
     user_id = payload.user_id.strip()
     contact_id = payload.contact_id.strip()
@@ -77,12 +77,14 @@ def add_contact(payload: ContactCreate, db: Session = Depends(get_db)):
         user_id=new_contact.user_id,
         contact_id=new_contact.contact_id,
         name=contact_user.name,
+        phone_number=contact_user.phone_number,
         username=contact_user.username,
         created_at=new_contact.created_at,
         is_online=manager.is_online(contact_user.id),
         contact=UserSearchResult(
             id=contact_user.id,
             name=contact_user.name,
+            phone_number=contact_user.phone_number,
             username=contact_user.username,
             is_online=manager.is_online(contact_user.id),
         ),
@@ -92,7 +94,7 @@ def add_contact(payload: ContactCreate, db: Session = Depends(get_db)):
 @router.get("/{user_id}", response_model=List[ContactResponse])
 def get_user_contacts(user_id: str, db: Session = Depends(get_db)):
     """
-    Return the user's contacts joined with the contact's name/username.
+    Return the user's contacts joined with the contact's name and phone number.
     Formatted for the Flutter home screen rendering.
     """
     clean_user_id = user_id.strip()
@@ -120,12 +122,14 @@ def get_user_contacts(user_id: str, db: Session = Depends(get_db)):
                 user_id=contact_record.user_id,
                 contact_id=contact_record.contact_id,
                 name=contact_user.name,
+                phone_number=contact_user.phone_number,
                 username=contact_user.username,
                 created_at=contact_record.created_at,
                 is_online=manager.is_online(contact_user.id),
                 contact=UserSearchResult(
                     id=contact_user.id,
                     name=contact_user.name,
+                    phone_number=contact_user.phone_number,
                     username=contact_user.username,
                     is_online=manager.is_online(contact_user.id),
                 ),

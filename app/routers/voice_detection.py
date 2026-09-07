@@ -2,12 +2,17 @@ import math
 import json
 import logging
 import os
+import re
 import tempfile
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from gradio_client import Client, handle_file
+from sqlalchemy.orm import Session
 
+from app.database import get_db
+from app.models import FlaggedNumber
+from app.schemas import FlaggedNumberResponse
 
 router = APIRouter(tags=["Voice Detection"])
 logger = logging.getLogger(__name__)
@@ -81,7 +86,11 @@ def _parse_result(value: Any, depth: int = 0) -> Optional[Dict[str, Any]]:
 
 
 @router.post("/voice-detection")
-def detect_voice(file: Optional[UploadFile] = File(None)) -> Dict[str, Any]:
+def detect_voice(
+    file: Optional[UploadFile] = File(None),
+    phone_number: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
     if file is None:
         return _failure_response()
 
@@ -158,6 +167,33 @@ def detect_voice(file: Optional[UploadFile] = File(None)) -> Dict[str, Any]:
             result,
         )
         parsed_result = _parse_result(result)
+        if parsed_result is not None and parsed_result["verdict"] == "FAKE" and phone_number:
+            clean_phone_number = phone_number.strip()
+            if re.fullmatch(r"\+?[0-9]{7,15}", clean_phone_number):
+                try:
+                    db.add(
+                        FlaggedNumber(
+                            phone_number=clean_phone_number,
+                            verdict=parsed_result["verdict"],
+                            fake_probability=parsed_result["fake_probability"],
+                            bonafide_score=parsed_result["bonafide_score"],
+                            source="voice_detection",
+                        )
+                    )
+                    db.commit()
+                    logger.info(
+                        "Persisted flagged number: phone_number=%r verdict=%s",
+                        clean_phone_number,
+                        parsed_result["verdict"],
+                    )
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Failed to persist flagged number: phone_number=%r",
+                        clean_phone_number,
+                    )
+            else:
+                logger.warning("Ignoring invalid flagged phone number: %r", phone_number)
         return parsed_result or _unexpected_response(result)
     except Exception:
         logger.exception("Voice detection failed while calling Gradio")
@@ -169,3 +205,15 @@ def detect_voice(file: Optional[UploadFile] = File(None)) -> Dict[str, Any]:
                 os.remove(temporary_path)
             except OSError:
                 pass
+
+
+@router.get("/scam-numbers", response_model=list[FlaggedNumberResponse])
+def get_scam_numbers(
+    limit: int = Query(50, ge=1, le=200),
+    phone_number: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    query = db.query(FlaggedNumber)
+    if phone_number:
+        query = query.filter(FlaggedNumber.phone_number == phone_number.strip())
+    return query.order_by(FlaggedNumber.flagged_at.desc()).limit(limit).all()

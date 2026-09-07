@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -15,7 +15,8 @@ class User(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String, nullable=False)
-    username = Column(String, unique=True, index=True, nullable=False)
+    phone_number = Column(String, unique=True, index=True, nullable=False)
+    username = Column(String, unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), default=get_utc_now, nullable=False)
 
     contacts = relationship(
@@ -40,3 +41,15 @@ class Contact(Base):
 
     user = relationship("User", foreign_keys=[user_id], back_populates="contacts")
     contact = relationship("User", foreign_keys=[contact_id])
+
+
+class FlaggedNumber(Base):
+    __tablename__ = "flagged_numbers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    phone_number = Column(String, index=True, nullable=False)
+    verdict = Column(String, nullable=False)
+    fake_probability = Column(Float, nullable=False)
+    bonafide_score = Column(Float, nullable=False)
+    source = Column(String, nullable=False, default="voice_detection")
+    flagged_at = Column(DateTime(timezone=True), default=get_utc_now, nullable=False)

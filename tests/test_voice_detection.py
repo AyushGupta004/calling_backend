@@ -1,8 +1,12 @@
 import os
 from unittest.mock import patch
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
+from app.database import Base, get_db
 from app.main import app
 
 
@@ -143,3 +147,51 @@ def test_voice_detection_parses_nested_json_result():
         )
 
     assert response.json()["verdict"] == "REAL"
+
+
+def test_fake_voice_detection_persists_and_lists_flagged_number():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(bind=engine)
+
+    def override_get_db():
+        db = session_factory()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with patch("app.routers.voice_detection.Client") as client_class:
+            client_class.return_value.predict.return_value = {
+                "success": True,
+                "fake_probability": 0.91,
+                "bonafide_score": 0.09,
+                "verdict": "FAKE",
+            }
+            response = client.post(
+                "/voice-detection",
+                data={"phone_number": "+15551234567"},
+                files={"file": ("caller.mp3", b"mp3 bytes", "audio/mpeg")},
+            )
+
+        assert response.json() == {
+            "success": True,
+            "fake_probability": 0.91,
+            "bonafide_score": 0.09,
+            "verdict": "FAKE",
+        }
+
+        scam_response = client.get("/scam-numbers?limit=5&phone_number=%2B15551234567")
+        assert scam_response.status_code == 200
+        listed = scam_response.json()
+        assert len(listed) == 1
+        assert listed[0]["phone_number"] == "+15551234567"
+        assert listed[0]["verdict"] == "FAKE"
+    finally:
+        app.dependency_overrides.pop(get_db, None)
